@@ -25,9 +25,206 @@ class HotelCleaningSystem:
         self.root.title("客室清掃管理システム")
         self.root.geometry("400x350")
 
-        self.setup_gui()
         self.init_database()
+
+        # 起動時にバックアップとチェックアウト削除を実行
+        self.startup_cleanup()
+
+        self.setup_gui()
         self.load_data()
+
+    def startup_cleanup(self):
+        """起動時のバックアップ作成とチェックアウト削除"""
+        # バックアップ作成
+        backup_file = self.create_database_backup_silent()
+
+        # チェックアウト削除ダイアログを表示
+        checkout_date = self.show_checkout_cleanup_dialog()
+
+        if checkout_date:
+            # C/Oの部屋と空白の部屋を削除
+            deleted_info = self.cleanup_checkout_rooms(checkout_date)
+
+            if deleted_info['total'] > 0:
+                message = f"データ整理が完了しました。\n\n"
+                message += f"✓ 削除された部屋: {deleted_info['total']}件\n"
+                if deleted_info['checkout'] > 0:
+                    message += f"  - チェックアウト完了: {deleted_info['checkout']}件\n"
+                if deleted_info['empty'] > 0:
+                    message += f"  - 空白データ: {deleted_info['empty']}件\n"
+                message += f"✓ チェックアウト日: {checkout_date.strftime('%Y年%m月%d日')}\n"
+                message += f"✓ バックアップ: {backup_file}"
+
+                messagebox.showinfo("起動時整理完了", message)
+
+    def show_checkout_cleanup_dialog(self):
+        """チェックアウト削除用の日付選択ダイアログ"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("起動時データ整理")
+        dialog.geometry("450x350")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding="20")
+        frame.pack(fill="both", expand=True)
+
+        # タイトル
+        title_label = ttk.Label(frame, text="起動時データ整理", font=("", 14, "bold"))
+        title_label.pack(pady=(0, 15))
+
+        # 説明
+        info_label = ttk.Label(frame,
+                               text="チェックアウト完了の部屋を削除します。\n"
+                                    "指定した日付にC/Oステータスの部屋がデータベースから削除されます。\n"
+                                    "（バックアップは自動で作成済みです）",
+                               font=("", 10), justify=tk.CENTER)
+        info_label.pack(pady=(0, 20))
+
+        # 日付選択
+        date_frame = ttk.LabelFrame(frame, text="チェックアウト日", padding="15")
+        date_frame.pack(fill="x", pady=(0, 20))
+
+        # デフォルトは今日の日付
+        today = datetime.now()
+        checkout_vars = {
+            'year': tk.StringVar(value=str(today.year)),
+            'month': tk.StringVar(value=str(today.month)),
+            'day': tk.StringVar(value=str(today.day))
+        }
+
+        date_input_frame = ttk.Frame(date_frame)
+        date_input_frame.pack()
+
+        ttk.Entry(date_input_frame, textvariable=checkout_vars['year'], width=6).pack(side="left")
+        ttk.Label(date_input_frame, text="年").pack(side="left", padx=(0, 10))
+
+        ttk.Entry(date_input_frame, textvariable=checkout_vars['month'], width=4).pack(side="left")
+        ttk.Label(date_input_frame, text="月").pack(side="left", padx=(0, 10))
+
+        ttk.Entry(date_input_frame, textvariable=checkout_vars['day'], width=4).pack(side="left")
+        ttk.Label(date_input_frame, text="日").pack(side="left")
+
+        # 今日の日付ボタン
+        today_frame = ttk.Frame(date_frame)
+        today_frame.pack(pady=(10, 0))
+
+        def set_today():
+            today = datetime.now()
+            checkout_vars['year'].set(str(today.year))
+            checkout_vars['month'].set(str(today.month))
+            checkout_vars['day'].set(str(today.day))
+
+        ttk.Button(today_frame, text="今日の日付", command=set_today).pack()
+
+        # 結果を格納する変数
+        result = {'date': None}
+
+        # ボタン
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(fill="x")
+
+        def on_ok():
+            try:
+                checkout_date = datetime(
+                    int(checkout_vars['year'].get()),
+                    int(checkout_vars['month'].get()),
+                    int(checkout_vars['day'].get())
+                )
+                result['date'] = checkout_date
+                dialog.destroy()
+            except ValueError:
+                messagebox.showerror("エラー", "正しい日付を入力してください")
+
+        def on_skip():
+            dialog.destroy()
+
+        ttk.Button(button_frame, text="削除実行", command=on_ok).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="スキップ", command=on_skip).pack(side="left", padx=5)
+
+        # ダイアログが閉じられるまで待機
+        dialog.wait_window()
+
+        return result['date']
+
+    def cleanup_checkout_rooms(self, checkout_date):
+        """指定日より前にC/Oステータスの部屋と空白の部屋を削除"""
+        cursor = self.conn.cursor()
+
+        # 指定日以前にC/Oステータスの部屋を検索
+        checkout_date_str = checkout_date.strftime('%Y-%m-%d')
+        cursor.execute("""
+                       SELECT DISTINCT room_number
+                       FROM cleaning_schedule
+                       WHERE cleaning_date <= ?
+                         AND cleaning_status = 'C/O'
+                       """, (checkout_date_str,))
+
+        checkout_rooms = [row[0] for row in cursor.fetchall()]
+
+        # デバッグ：C/O部屋を表示
+        print(f"C/O部屋: {checkout_rooms}")
+
+        # 清掃スケジュールが空白（全く登録されていない）部屋を検索
+        cursor.execute("""
+                       SELECT room_number
+                       FROM rooms
+                       WHERE room_number NOT IN (SELECT DISTINCT room_number
+                                                 FROM cleaning_schedule)
+                       """)
+
+        empty_rooms = [row[0] for row in cursor.fetchall()]
+
+        # デバッグ：空白部屋を表示
+        print(f"空白部屋: {empty_rooms}")
+
+        # さらに、cleaning_statusが空文字列やNULLの部屋も検索
+        cursor.execute("""
+                       SELECT DISTINCT room_number
+                       FROM cleaning_schedule
+                       WHERE cleaning_status = ''
+                          OR cleaning_status IS NULL
+                       """)
+
+        null_or_empty_rooms = [row[0] for row in cursor.fetchall()]
+        print(f"空文字列/NULL部屋: {null_or_empty_rooms}")
+
+        # 全ての空白パターンを統合
+        rooms_to_delete = list(set(checkout_rooms + empty_rooms + null_or_empty_rooms))
+
+        # デバッグ：削除対象の部屋を表示
+        print(f"削除対象の部屋: {rooms_to_delete}")
+
+        if rooms_to_delete:
+            # rooms テーブルから削除
+            placeholders = ','.join(['?' for _ in rooms_to_delete])
+            cursor.execute(f"DELETE FROM rooms WHERE room_number IN ({placeholders})", rooms_to_delete)
+
+            # cleaning_schedule テーブルからも削除
+            cursor.execute(f"DELETE FROM cleaning_schedule WHERE room_number IN ({placeholders})", rooms_to_delete)
+
+            self.conn.commit()
+
+            # 削除の内訳を返す
+            return {
+                'total': len(rooms_to_delete),
+                'checkout': len(checkout_rooms),
+                'empty': len(empty_rooms),
+                'null_or_empty': len(null_or_empty_rooms)
+            }
+
+        return {'total': 0, 'checkout': 0, 'empty': 0, 'null_or_empty': 0}
+
+    def create_database_backup_silent(self):
+        """サイレントバックアップ作成（メッセージなし）"""
+        try:
+            import shutil
+            backup_name = f"hotel_cleaning_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+            shutil.copy2(self.db_file, backup_name)
+            return backup_name
+        except Exception as e:
+            print(f"バックアップエラー: {e}")
+            return "作成失敗"
 
     def setup_gui(self):
         frame = ttk.Frame(self.root, padding="10")
@@ -76,12 +273,12 @@ class HotelCleaningSystem:
         self.vars['ecoplan'] = tk.BooleanVar()
         ttk.Checkbutton(frame, text="エコプラン", variable=self.vars['ecoplan']).grid(row=5, column=1, sticky="w")
 
-        # ボタン
+        # ボタン（シンプル化）
         btn_frame = ttk.Frame(frame)
         btn_frame.grid(row=6, column=0, columnspan=2, pady=20)
 
         ttk.Button(btn_frame, text="次の部屋", command=self.add_room).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="エコ票作成", command=self.create_schedule_with_cleanup).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="エコ票作成", command=self.create_schedule).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="部屋編集", command=self.edit_room).pack(side="left", padx=5)
 
     def filter_numbers(self, event):
@@ -125,7 +322,6 @@ class HotelCleaningSystem:
         self.conn.commit()
 
     def load_data(self):
-        self.cleanup_expired()
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM rooms ORDER BY CAST(room_number AS INTEGER)")
 
@@ -141,7 +337,7 @@ class HotelCleaningSystem:
                 'ecodoor': bool(ecodoor),
                 'ecoplan': bool(ecoplan),
                 'schedule': {},
-                'is_new': False  # 既存レコード
+                'is_new': False
             }
 
             # スケジュール読み込み
@@ -153,42 +349,6 @@ class HotelCleaningSystem:
                 record['schedule'][f"{date.month}/{date.day}"] = status
 
             self.records.append(record)
-
-    def cleanup_expired(self):
-        # Excelファイル基準で期限切れデータを削除
-        if not os.path.exists(self.excel_file):
-            return
-
-        try:
-            wb = openpyxl.load_workbook(self.excel_file)
-            today_str = str(datetime.now().day)
-            rooms_to_delete = set()
-
-            for sheet in wb.worksheets:
-                # 今日の日付の列を探す
-                today_col = None
-                for col in range(4, 35):
-                    if str(sheet.cell(3, col).value) == today_str:
-                        today_col = col
-                        break
-
-                if today_col:
-                    # 今日の列が空白の部屋を削除対象に
-                    for row in range(4, sheet.max_row + 1):
-                        room = sheet.cell(row, 3).value
-                        if room and not sheet.cell(row, today_col).value:
-                            rooms_to_delete.add(str(room))
-
-            wb.close()
-
-            if rooms_to_delete:
-                cursor = self.conn.cursor()
-                cursor.execute(f"DELETE FROM rooms WHERE room_number IN ({','.join(['?'] * len(rooms_to_delete))})",
-                               list(rooms_to_delete))
-                self.conn.commit()
-                print(f"{len(rooms_to_delete)}件の部屋を削除しました")
-        except Exception as e:
-            print(f"削除処理エラー: {e}")
 
     def add_room(self):
         room = self.vars['room'].get().strip()
@@ -232,8 +392,6 @@ class HotelCleaningSystem:
 
         self.records.append(record)
         self.existing_rooms.add(room)
-
-        # 新しいレコードとしてマーク
         record['is_new'] = True
 
         # フォームクリア
@@ -244,8 +402,8 @@ class HotelCleaningSystem:
 
         messagebox.showinfo("情報", "部屋が追加されました")
 
-    def create_schedule_with_cleanup(self):
-        """エコ票作成と同時に清掃日決定・データベース整理・バックアップを実行"""
+    def create_schedule(self):
+        """シンプル化されたエコ票作成"""
         if not self.records:
             messagebox.showerror("エラー", "記録する部屋がありません")
             return
@@ -254,33 +412,8 @@ class HotelCleaningSystem:
         if self.vars['room'].get().strip():
             self.add_room()
 
-        # 清掃日選択ダイアログを表示
-        cleanup_date = self.show_cleanup_date_dialog()
-        if not cleanup_date:
-            return  # キャンセルされた場合
-
-        # エコ票作成前の確認（清掃日とバックアップを含む）
-        result = messagebox.askyesno(
-            "エコ票作成・データベース整理確認",
-            f"以下の処理を実行しますか？\n\n"
-            f"1. エコ票の作成\n"
-            f"2. 清掃日({cleanup_date.strftime('%Y年%m月%d日')})基準でのデータベース整理\n"
-            f"3. データベースのバックアップ作成\n\n"
-            f"※データベース整理により、{cleanup_date.strftime('%m月%d日')}の列が空白の部屋が削除されます",
-            icon='question'
-        )
-
-        if not result:
-            return
-
         try:
-            # 1. バックアップ作成
-            backup_file = self.create_database_backup()
-            if not backup_file:
-                # バックアップ失敗時は処理を中止
-                return
-
-            # 2. 新しいレコードをデータベース保存
+            # 新しいレコードをデータベース保存
             new_records = [r for r in self.records if r.get('is_new', True)]
 
             cursor = self.conn.cursor()
@@ -292,7 +425,6 @@ class HotelCleaningSystem:
                 cursor.execute("DELETE FROM cleaning_schedule WHERE room_number = ?", (record['room'],))
                 for date_str, status in record['schedule'].items():
                     month, day = map(int, date_str.split('/'))
-                    # 年をまたぐ場合の処理
                     year = record['date'].year
                     if month < record['date'].month:
                         year += 1
@@ -302,28 +434,19 @@ class HotelCleaningSystem:
 
             self.conn.commit()
 
-            # 3. Excel生成（全レコード使用）
+            # Excel生成
             self.generate_excel()
 
-            # 4. 清掃日基準でデータベース整理
-            deleted_count = self.cleanup_based_on_exact_date(cleanup_date)
-
-            # 5. データ再読み込み
+            # データ再読み込み
             self.records.clear()
             self.existing_rooms.clear()
             self.load_data()
 
-            # 6. 新しいレコードのフラグをクリア（残っているレコード用）
+            # 新しいレコードのフラグをクリア
             for record in self.records:
                 record['is_new'] = False
 
-            # 完了メッセージ
-            messagebox.showinfo("処理完了",
-                                f"エコ票作成とデータベース整理が完了しました。\n\n"
-                                f"✓ 新規登録: {len(new_records)}件\n"
-                                f"✓ 削除された部屋: {deleted_count}件\n"
-                                f"✓ 清掃基準日: {cleanup_date.strftime('%Y年%m月%d日')}\n"
-                                f"✓ バックアップ: {backup_file}")
+            messagebox.showinfo("完了", f"エコ票を作成しました。\n新規登録: {len(new_records)}件")
 
             # Excel ファイルを開く
             self.open_excel()
@@ -331,103 +454,9 @@ class HotelCleaningSystem:
         except Exception as e:
             messagebox.showerror("エラー", f"処理中にエラーが発生しました: {e}")
 
-    def show_cleanup_date_dialog(self):
-        """清掃日選択ダイアログを表示"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("清掃日選択")
-        dialog.geometry("400x300")
-        dialog.resizable(False, False)
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        frame = ttk.Frame(dialog, padding="20")
-        frame.pack(fill="both", expand=True)
-
-        # タイトル
-        title_label = ttk.Label(frame, text="清掃日選択", font=("", 14, "bold"))
-        title_label.pack(pady=(0, 20))
-
-        # 説明
-        info_label = ttk.Label(frame,
-                               text="データベース整理の基準となる清掃日を選択してください。\n"
-                                    "この日付の列が空白の部屋がデータベースから削除されます。",
-                               font=("", 10), justify=tk.CENTER)
-        info_label.pack(pady=(0, 20))
-
-        # 日付選択
-        date_frame = ttk.LabelFrame(frame, text="清掃日", padding="15")
-        date_frame.pack(fill="x", pady=(0, 20))
-
-        # デフォルトは今日の日付
-        today = datetime.now()
-        cleanup_vars = {
-            'year': tk.StringVar(value=str(today.year)),
-            'month': tk.StringVar(value=str(today.month)),
-            'day': tk.StringVar(value=str(today.day))
-        }
-
-        date_input_frame = ttk.Frame(date_frame)
-        date_input_frame.pack()
-
-        ttk.Entry(date_input_frame, textvariable=cleanup_vars['year'], width=6).pack(side="left")
-        ttk.Label(date_input_frame, text="年").pack(side="left", padx=(0, 10))
-
-        ttk.Entry(date_input_frame, textvariable=cleanup_vars['month'], width=4).pack(side="left")
-        ttk.Label(date_input_frame, text="月").pack(side="left", padx=(0, 10))
-
-        ttk.Entry(date_input_frame, textvariable=cleanup_vars['day'], width=4).pack(side="left")
-        ttk.Label(date_input_frame, text="日").pack(side="left")
-
-        # 今日の日付ボタン
-        today_frame = ttk.Frame(date_frame)
-        today_frame.pack(pady=(10, 0))
-
-        def set_today():
-            today = datetime.now()
-            cleanup_vars['year'].set(str(today.year))
-            cleanup_vars['month'].set(str(today.month))
-            cleanup_vars['day'].set(str(today.day))
-
-        ttk.Button(today_frame, text="今日の日付", command=set_today).pack()
-
-        # 結果を格納する変数
-        result = {'date': None}
-
-        # ボタン
-        button_frame = ttk.Frame(frame)
-        button_frame.pack(fill="x")
-
-        def on_ok():
-            try:
-                cleanup_date = datetime(
-                    int(cleanup_vars['year'].get()),
-                    int(cleanup_vars['month'].get()),
-                    int(cleanup_vars['day'].get())
-                )
-                result['date'] = cleanup_date
-                dialog.destroy()
-            except ValueError:
-                messagebox.showerror("エラー", "正しい日付を入力してください")
-
-        def on_cancel():
-            dialog.destroy()
-
-        ttk.Button(button_frame, text="OK", command=on_ok).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="キャンセル", command=on_cancel).pack(side="left", padx=5)
-
-        # ダイアログが閉じられるまで待機
-        dialog.wait_window()
-
-        return result['date']
-
-    def create_schedule(self):
-        """従来のエコ票作成機能（バックアップ機能付きに変更）"""
-        # 新しい統合機能を呼び出す
-        self.create_schedule_with_cleanup()
-
     def generate_excel(self):
         wb = openpyxl.Workbook()
-        wb.remove(wb.active)  # デフォルトシートを削除
+        wb.remove(wb.active)
 
         # ソート
         self.records.sort(key=lambda x: int(x['room']) if x['room'].isdigit() else float('inf'))
@@ -453,7 +482,7 @@ class HotelCleaningSystem:
             year = self.records[0]['date'].year if self.records else datetime.now().year
             days_in_month = calendar.monthrange(year, month)[1]
 
-            # 日付ヘッダー（その月の日数分のみ）
+            # 日付ヘッダー
             for day in range(1, days_in_month + 1):
                 ws.cell(3, 3 + day, str(day))
 
@@ -484,57 +513,14 @@ class HotelCleaningSystem:
                             ws.cell(row, 3 + day, status)
 
             # 列幅調整
-            ws.column_dimensions['A'].width = 12  # 氏名
-            ws.column_dimensions['C'].width = 8  # 部屋番号
+            ws.column_dimensions['A'].width = 12
+            ws.column_dimensions['C'].width = 8
             for day in range(1, days_in_month + 1):
                 col_letter = openpyxl.utils.get_column_letter(3 + day)
                 ws.column_dimensions[col_letter].width = 6
 
         wb.save(self.excel_file)
         wb.close()
-
-    def delete_room(self):
-        room = self.vars['room'].get().strip()
-
-        if not room:
-            # 選択ダイアログ
-            all_rooms = list(self.existing_rooms) + [r['room'] for r in self.records]
-            all_rooms = sorted(set(all_rooms), key=lambda x: int(x) if x.isdigit() else float('inf'))
-
-            if not all_rooms:
-                messagebox.showinfo("情報", "削除できる部屋がありません")
-                return
-
-            dialog = tk.Toplevel(self.root)
-            dialog.title("部屋削除")
-            dialog.geometry("200x300")
-
-            listbox = tk.Listbox(dialog)
-            for r in all_rooms:
-                listbox.insert(tk.END, r)
-            listbox.pack(fill="both", expand=True, padx=10, pady=10)
-
-            def delete_selected():
-                sel = listbox.curselection()
-                if sel:
-                    room = all_rooms[sel[0]]
-                    dialog.destroy()
-                    self.confirm_delete(room)
-
-            ttk.Button(dialog, text="削除", command=delete_selected).pack(pady=5)
-        else:
-            self.confirm_delete(room)
-
-    def confirm_delete(self, room):
-        if messagebox.askyesno("削除確認", f"部屋番号 {room} を削除しますか？"):
-            cursor = self.conn.cursor()
-            cursor.execute("DELETE FROM rooms WHERE room_number = ?", (room,))
-            self.conn.commit()
-
-            self.records = [r for r in self.records if r['room'] != room]
-            self.existing_rooms.discard(room)
-
-            messagebox.showinfo("削除完了", f"部屋番号 {room} を削除しました")
 
     def edit_room(self):
         """部屋の編集"""
@@ -544,7 +530,6 @@ class HotelCleaningSystem:
             self.show_room_edit_dialog()
             return
 
-        # 入力された部屋番号の編集
         self.open_edit_dialog(room)
 
     def show_room_edit_dialog(self):
@@ -567,7 +552,6 @@ class HotelCleaningSystem:
 
         listbox = tk.Listbox(dialog, selectmode=tk.SINGLE)
         for room in all_rooms:
-            # 部屋の詳細情報を表示
             record = self.find_room_record(room)
             if record:
                 display_text = f"{room} - {record['guest']} ({record['days']}日)"
@@ -622,7 +606,7 @@ class HotelCleaningSystem:
 
         dialog = tk.Toplevel(self.root)
         dialog.title(f"部屋 {room_number} の編集")
-        dialog.geometry("500x650")
+        dialog.geometry("500x700")
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -663,7 +647,6 @@ class HotelCleaningSystem:
         checkout_frame = ttk.Frame(frame)
         checkout_frame.grid(row=3, column=1, sticky="w", pady=5)
 
-        # チェックアウト日を計算
         checkout_date = record['date'] + timedelta(days=record['days'])
         edit_vars['checkout_year'] = tk.StringVar(value=str(checkout_date.year))
         edit_vars['checkout_month'] = tk.StringVar(value=str(checkout_date.month))
@@ -707,27 +690,23 @@ class HotelCleaningSystem:
             canvas.configure(scrollregion=canvas.bbox("all"))
 
         def on_mousewheel(event):
-            # macOS/Windows/Linux対応のマウスホイール
-            if platform.system() == "Darwin":  # macOS
-                # macOSでは event.delta の値が異なる
+            if platform.system() == "Darwin":
                 canvas.yview_scroll(int(-1 * event.delta), "units")
             else:  # Windows/Linux
                 canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-        # マウスホイールバインド（複数のイベントに対応）
+        # マウスホイールバインド
         def bind_mousewheel(widget):
-            if platform.system() == "Darwin":  # macOS
+            if platform.system() == "Darwin": #mac
                 widget.bind("<MouseWheel>", on_mousewheel)
             else:  # Windows/Linux
                 widget.bind("<MouseWheel>", on_mousewheel)
                 widget.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
                 widget.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
 
-        # キャンバスとスクロール可能フレームにマウスホイールをバインド
         bind_mousewheel(canvas)
         bind_mousewheel(scrollable_frame)
 
-        # フォーカスを設定してスクロールを有効にする
         def on_canvas_click(event):
             canvas.focus_set()
 
@@ -738,7 +717,6 @@ class HotelCleaningSystem:
         canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        # キャンバスのサイズ調整
         def configure_canvas(event):
             canvas.itemconfig(canvas_window, width=event.width)
 
@@ -759,11 +737,9 @@ class HotelCleaningSystem:
             schedule_vars.clear()
 
             try:
-                # 空文字列チェック
                 if not all([edit_vars['checkin_year'].get(), edit_vars['checkin_month'].get(),
                             edit_vars['checkin_day'].get(), edit_vars['checkout_year'].get(),
                             edit_vars['checkout_month'].get(), edit_vars['checkout_day'].get()]):
-                    # 通常のLabel（ttk.Labelではない）を使用
                     error_label = tk.Label(scrollable_frame, text="日付を入力してください", fg="red")
                     error_label.pack()
                     return
@@ -845,7 +821,7 @@ class HotelCleaningSystem:
                     if current_date == checkin or current_date == checkout:
                         status_combo.config(state='disabled')
 
-                    # 各行フレームにもマウスホイールをバインド
+                    # マウスホイールをバインド
                     bind_mousewheel(row_frame)
                     bind_mousewheel(date_label)
                     bind_mousewheel(status_label)
@@ -858,15 +834,13 @@ class HotelCleaningSystem:
                 bind_mousewheel(header_frame)
                 bind_mousewheel(data_frame)
 
-                # スクロール範囲を更新（少し遅延させて確実に更新）
+                # スクロール範囲を更新
                 def update_scroll_region():
                     scrollable_frame.update_idletasks()
                     canvas.update_idletasks()
                     canvas.configure(scrollregion=canvas.bbox("all"))
-                    # 初期位置を一番上に設定
                     canvas.yview_moveto(0)
 
-                # 少し遅延してスクロール範囲を更新
                 canvas.after(100, update_scroll_region)
 
                 # 長期間の場合はスクロールバーを目立たせる
@@ -988,189 +962,14 @@ class HotelCleaningSystem:
 
         return schedule
 
-    def clear_form(self):
-        """フォームのクリア"""
-        self.vars['room'].set("")
-        self.vars['guest'].set("")
-        self.vars['ecodoor'].set(False)
-        self.vars['ecoplan'].set(False)
-
-    def execute_database_cleanup(self):
-        """メインフォームの清掃日を使用してデータベース整理を実行"""
-        try:
-            cleanup_date = datetime(
-                int(self.vars['cleanup_year'].get()),
-                int(self.vars['cleanup_month'].get()),
-                int(self.vars['cleanup_day'].get())
-            )
-        except ValueError:
-            messagebox.showerror("エラー", "正しい清掃日を入力してください")
-            return
-
-        # 確認ダイアログ
-        result = messagebox.askyesno(
-            "データベース整理確認",
-            f"清掃日 {cleanup_date.strftime('%Y年%m月%d日')} を基準にデータベース整理を実行しますか？\n\n"
-            "この操作により、該当日の列が空白の部屋がデータベースから削除されます。\n"
-            "実行前にバックアップを作成することを推奨します。",
-            icon='warning'
-        )
-
-        if not result:
-            return
-
-        # バックアップ作成の確認
-        create_backup = messagebox.askyesno(
-            "バックアップ作成",
-            "実行前にデータベースのバックアップを作成しますか？\n"
-            "（推奨：はい）"
-        )
-
-        backup_file = None
-        if create_backup:
-            backup_file = self.create_database_backup()
-            if not backup_file:
-                return
-
-        try:
-            # データベース整理実行
-            deleted_count = self.cleanup_based_on_exact_date(cleanup_date)
-
-            # データ再読み込み
-            self.records.clear()
-            self.existing_rooms.clear()
-            self.load_data()
-
-            if deleted_count > 0:
-                messagebox.showinfo("整理完了",
-                                    f"データベース整理が完了しました。\n"
-                                    f"削除された部屋数: {deleted_count}件\n"
-                                    f"削除基準日: {cleanup_date.strftime('%Y年%m月%d日')}\n"
-                                    f"バックアップ: {backup_file if backup_file else '作成されませんでした'}")
-            else:
-                messagebox.showinfo("整理完了", "削除対象の部屋はありませんでした。")
-
-        except Exception as e:
-            messagebox.showerror("エラー", f"データベース整理中にエラーが発生しました: {e}")
-
-    def cleanup_based_on_exact_date(self, cleanup_date):
-        """指定された正確な日付を基準にしたデータベース整理"""
-        if not os.path.exists(self.excel_file):
-            print("Excelファイルが存在しないため、日付での削除をスキップします。")
-            return 0
-
-        try:
-            wb = openpyxl.load_workbook(self.excel_file)
-            cleanup_day_str = str(cleanup_date.day)
-            cleanup_month = cleanup_date.month
-            rooms_to_delete = set()
-
-            print(f"削除基準: {cleanup_date.strftime('%Y年%m月%d日')}")
-
-            for sheet in wb.worksheets:
-                sheet_name = sheet.title
-                print(f"シート '{sheet_name}' を処理中")
-
-                # シート名から月を判定（例：「7月」「8月」）
-                sheet_month = None
-                if '月' in sheet_name:
-                    try:
-                        sheet_month = int(sheet_name.replace('月', ''))
-                    except ValueError:
-                        print(f"  - シート名から月を判定できません: {sheet_name}")
-                        continue
-                else:
-                    print(f"  - 月の情報がないシートをスキップ: {sheet_name}")
-                    continue
-
-                # 清掃日の月と一致するシートのみ処理
-                if sheet_month != cleanup_month:
-                    print(f"  - 月が一致しないためスキップ（シート: {sheet_month}月, 清掃日: {cleanup_month}月）")
-                    continue
-
-                print(f"  - 月が一致するため処理実行（{cleanup_month}月）")
-
-                # 指定された日付の列を探す
-                cleanup_col = None
-                for col in range(4, 35):
-                    cell_value = sheet.cell(3, col).value
-                    if cell_value and str(cell_value).strip() == cleanup_day_str:
-                        cleanup_col = col
-                        print(f"    - {cleanup_date.day}日の列を発見（列{cleanup_col}）")
-                        break
-
-                if cleanup_col:
-                    # 指定日の列が空白の部屋を削除対象に
-                    for row in range(4, sheet.max_row + 1):
-                        room_cell = sheet.cell(row, 3)
-                        if room_cell.value:
-                            room_number = str(room_cell.value).strip()
-
-                            cleanup_cell = sheet.cell(row, cleanup_col)
-                            cleanup_value = str(cleanup_cell.value).strip() if cleanup_cell.value else ""
-
-                            if not cleanup_value:
-                                rooms_to_delete.add(room_number)
-                                print(f"      削除対象: 部屋{room_number}")
-                            else:
-                                print(f"      保持: 部屋{room_number} ({cleanup_value})")
-                else:
-                    print(f"    - {cleanup_date.day}日の列が見つかりません")
-
-            wb.close()
-
-            # 削除対象の部屋をデータベースから削除
-            if rooms_to_delete:
-                self.delete_rooms_from_database(rooms_to_delete)
-                print(
-                    f"正確な日付({cleanup_date.strftime('%Y-%m-%d')})基準で {len(rooms_to_delete)} 件の部屋を削除しました。")
-                return len(rooms_to_delete)
-            else:
-                print("正確な日付基準での削除対象はありませんでした。")
-                return 0
-
-        except Exception as e:
-            print(f"正確な日付での削除中にエラーが発生しました: {e}")
-            raise e
-
-    def create_database_backup(self):
-        """データベースのバックアップを作成"""
-        try:
-            import shutil
-            from datetime import datetime
-
-            backup_name = f"hotel_cleaning_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-            shutil.copy2(self.db_file, backup_name)
-
-            messagebox.showinfo("バックアップ完了", f"バックアップを作成しました: {backup_name}")
-            return backup_name
-        except Exception as e:
-            messagebox.showerror("バックアップエラー", f"バックアップの作成に失敗しました: {e}")
-            return None
-
-    def delete_rooms_from_database(self, room_numbers):
-        """指定された部屋番号のリストをデータベースから削除"""
-        if not room_numbers:
-            return
-
-        cursor = self.conn.cursor()
-        placeholders = ','.join(['?' for _ in room_numbers])
-        query = f"DELETE FROM rooms WHERE room_number IN ({placeholders})"
-
-        cursor.execute(query, list(room_numbers))
-        deleted_count = cursor.rowcount
-        self.conn.commit()
-
-        print(f"データベースから {deleted_count} 件の部屋を削除しました。")
-
     def open_excel(self):
         """エクセルファイルを開く"""
         try:
-            if platform.system() == "Darwin":  # macOS
+            if platform.system() == "Darwin":
                 subprocess.call(("open", self.excel_file))
-            elif platform.system() == "Windows":  # Windows
+            elif platform.system() == "Windows":
                 os.startfile(self.excel_file)
-            else:  # Linux
+            else:
                 subprocess.call(("xdg-open", self.excel_file))
         except Exception as e:
             messagebox.showerror("エラー", f"ファイルを開けませんでした: {e}")
@@ -1184,3 +983,4 @@ class HotelCleaningSystem:
 if __name__ == "__main__":
     app = HotelCleaningSystem()
     app.run()
+
