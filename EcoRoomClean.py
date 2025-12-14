@@ -33,6 +33,25 @@ class HotelCleaningSystem:
         self.setup_gui()
         self.load_data()
 
+    def force_halfwidth_input(self, event):
+        """全角入力を半角に変換し、数字以外を削除"""
+        widget = event.widget
+        current_pos = widget.index(tk.INSERT)
+        text = widget.get()
+
+        # 全角数字を半角数字に変換
+        halfwidth = text.translate(str.maketrans('０１２３４５６７８９', '0123456789'))
+
+        # 数字以外の文字を削除
+        numbers_only = re.sub(r'[^0-9]', '', halfwidth)
+
+        if text != numbers_only:
+            widget.delete(0, tk.END)
+            widget.insert(0, numbers_only)
+            # カーソル位置を調整（削除された文字分を考慮）
+            new_pos = min(current_pos, len(numbers_only))
+            widget.icursor(new_pos)
+
     def startup_cleanup(self):
         """起動時のバックアップ作成とチェックアウト削除"""
         # バックアップ作成
@@ -77,7 +96,7 @@ class HotelCleaningSystem:
         info_label = ttk.Label(frame,
                                text="チェックアウト完了の部屋を削除します。\n"
                                     "指定した日付にC/Oステータスの部屋がデータベースから削除されます。\n"
-                                    "（バックアップは自動で作成済みです）",
+                                    "(バックアップは自動で作成済みです)",
                                font=("", 10), justify=tk.CENTER)
         info_label.pack(pady=(0, 20))
 
@@ -96,13 +115,19 @@ class HotelCleaningSystem:
         date_input_frame = ttk.Frame(date_frame)
         date_input_frame.pack()
 
-        ttk.Entry(date_input_frame, textvariable=checkout_vars['year'], width=6).pack(side="left")
+        year_entry = ttk.Entry(date_input_frame, textvariable=checkout_vars['year'], width=6)
+        year_entry.pack(side="left")
+        year_entry.bind('<KeyRelease>', self.force_halfwidth_input)
         ttk.Label(date_input_frame, text="年").pack(side="left", padx=(0, 10))
 
-        ttk.Entry(date_input_frame, textvariable=checkout_vars['month'], width=4).pack(side="left")
+        month_entry = ttk.Entry(date_input_frame, textvariable=checkout_vars['month'], width=4)
+        month_entry.pack(side="left")
+        month_entry.bind('<KeyRelease>', self.force_halfwidth_input)
         ttk.Label(date_input_frame, text="月").pack(side="left", padx=(0, 10))
 
-        ttk.Entry(date_input_frame, textvariable=checkout_vars['day'], width=4).pack(side="left")
+        day_entry = ttk.Entry(date_input_frame, textvariable=checkout_vars['day'], width=4)
+        day_entry.pack(side="left")
+        day_entry.bind('<KeyRelease>', self.force_halfwidth_input)
         ttk.Label(date_input_frame, text="日").pack(side="left")
 
         # 今日の日付ボタン
@@ -162,10 +187,10 @@ class HotelCleaningSystem:
 
         checkout_rooms = [row[0] for row in cursor.fetchall()]
 
-        # デバッグ：C/O部屋を表示
+        # デバッグ:C/O部屋を表示
         print(f"C/O部屋: {checkout_rooms}")
 
-        # 清掃スケジュールが空白（全く登録されていない）部屋を検索
+        # 清掃スケジュールが空白(全く登録されていない)部屋を検索
         cursor.execute("""
                        SELECT room_number
                        FROM rooms
@@ -175,7 +200,7 @@ class HotelCleaningSystem:
 
         empty_rooms = [row[0] for row in cursor.fetchall()]
 
-        # デバッグ：空白部屋を表示
+        # デバッグ:空白部屋を表示
         print(f"空白部屋: {empty_rooms}")
 
         # さらに、cleaning_statusが空文字列やNULLの部屋も検索
@@ -192,7 +217,7 @@ class HotelCleaningSystem:
         # 全ての空白パターンを統合
         rooms_to_delete = list(set(checkout_rooms + empty_rooms + null_or_empty_rooms))
 
-        # デバッグ：削除対象の部屋を表示
+        # デバッグ:削除対象の部屋を表示
         print(f"削除対象の部屋: {rooms_to_delete}")
 
         if rooms_to_delete:
@@ -216,7 +241,7 @@ class HotelCleaningSystem:
         return {'total': 0, 'checkout': 0, 'empty': 0, 'null_or_empty': 0}
 
     def create_database_backup_silent(self):
-        """サイレントバックアップ作成（メッセージなし）"""
+        """サイレントバックアップ作成(メッセージなし)"""
         try:
             import shutil
             backup_name = f"hotel_cleaning_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
@@ -235,12 +260,12 @@ class HotelCleaningSystem:
             ("部屋番号", "room"),
             ("お客様名", "guest"),
             ("チェックイン日", "date"),
-            ("清掃期間（日）", "days")
+            ("清掃期間(日)", "days")
         ]
 
         self.vars = {}
         for i, (label, key) in enumerate(fields):
-            ttk.Label(frame, text=f"{label}：").grid(row=i, column=0, sticky="w", pady=5)
+            ttk.Label(frame, text=f"{label}:").grid(row=i, column=0, sticky="w", pady=5)
 
             if key == "date":
                 date_frame = ttk.Frame(frame)
@@ -251,29 +276,31 @@ class HotelCleaningSystem:
                 self.vars['day'] = tk.StringVar(value=str(today.day))
 
                 for var, label_text in [('year', '年'), ('month', '月'), ('day', '日')]:
-                    ttk.Entry(date_frame, textvariable=self.vars[var], width=5).pack(side="left")
+                    entry = ttk.Entry(date_frame, textvariable=self.vars[var], width=5)
+                    entry.pack(side="left")
+                    entry.bind('<KeyRelease>', self.force_halfwidth_input)
                     ttk.Label(date_frame, text=label_text).pack(side="left")
             elif key == "days":
                 self.vars[key] = tk.IntVar(value=2)
-                ttk.Spinbox(frame, from_=2, to=999, textvariable=self.vars[key], width=20).grid(row=i, column=1,
-                                                                                                sticky="w")
+                ttk.Spinbox(frame, from_=2, to=999, textvariable=self.vars[key], width=20).grid(row=i, column=1,                                                                 sticky="w")
             else:
                 self.vars[key] = tk.StringVar()
                 entry = ttk.Entry(frame, textvariable=self.vars[key], width=20)
                 entry.grid(row=i, column=1, sticky="w")
                 if key == "room":
                     entry.bind('<KeyRelease>', self.filter_numbers)
+                    entry.bind('<KeyRelease>', self.force_halfwidth_input, add='+')
 
         # チェックボックス
-        ttk.Label(frame, text="オプション：").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="オプション:").grid(row=4, column=0, sticky="w", pady=5)
         self.vars['ecodoor'] = tk.BooleanVar()
         ttk.Checkbutton(frame, text="エコドア", variable=self.vars['ecodoor']).grid(row=4, column=1, sticky="w")
 
-        ttk.Label(frame, text="プラン：").grid(row=5, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="プラン:").grid(row=5, column=0, sticky="w", pady=5)
         self.vars['ecoplan'] = tk.BooleanVar()
         ttk.Checkbutton(frame, text="エコプラン", variable=self.vars['ecoplan']).grid(row=5, column=1, sticky="w")
 
-        # ボタン（シンプル化）
+        # ボタン(シンプル化)
         btn_frame = ttk.Frame(frame)
         btn_frame.grid(row=6, column=0, columnspan=2, pady=20)
 
@@ -282,10 +309,22 @@ class HotelCleaningSystem:
         ttk.Button(btn_frame, text="部屋編集", command=self.edit_room).pack(side="left", padx=5)
 
     def filter_numbers(self, event):
+        """部屋番号専用：全角数字を半角に変換し、数字以外を削除"""
+        widget = event.widget
+        current_pos = widget.index(tk.INSERT)
         text = self.vars['room'].get()
-        filtered = re.sub(r'[^0-9]', '', text)
+
+        # 全角数字を半角数字に変換
+        halfwidth = text.translate(str.maketrans('０１２３４５６７８９', '0123456789'))
+
+        # 数字以外の文字を削除
+        filtered = re.sub(r'[^0-9]', '', halfwidth)
+
         if text != filtered:
             self.vars['room'].set(filtered)
+            # カーソル位置を調整
+            new_pos = min(current_pos, len(filtered))
+            widget.icursor(new_pos)
 
     def init_database(self):
         self.conn = sqlite3.connect(self.db_file)
@@ -533,7 +572,7 @@ class HotelCleaningSystem:
         self.open_edit_dialog(room)
 
     def show_room_edit_dialog(self):
-        """部屋選択ダイアログを表示（編集用）"""
+        """部屋選択ダイアログを表示(編集用)"""
         all_rooms = list(self.existing_rooms) + [r['room'] for r in self.records]
         all_rooms = sorted(set(all_rooms), key=lambda x: int(x) if x.isdigit() else float('inf'))
 
@@ -548,7 +587,7 @@ class HotelCleaningSystem:
         dialog.transient(self.root)
         dialog.grab_set()
 
-        ttk.Label(dialog, text="編集する部屋を選択してください：").pack(pady=10)
+        ttk.Label(dialog, text="編集する部屋を選択してください:").pack(pady=10)
 
         listbox = tk.Listbox(dialog, selectmode=tk.SINGLE)
         for room in all_rooms:
@@ -617,17 +656,17 @@ class HotelCleaningSystem:
         # 編集用変数
         edit_vars = {}
 
-        # 部屋番号（編集不可）
-        ttk.Label(frame, text="部屋番号：").grid(row=0, column=0, sticky="w", pady=5)
+        # 部屋番号(編集不可)
+        ttk.Label(frame, text="部屋番号:").grid(row=0, column=0, sticky="w", pady=5)
         ttk.Label(frame, text=room_number, font=("", 10, "bold")).grid(row=0, column=1, sticky="w", pady=5)
 
         # お客様名
-        ttk.Label(frame, text="お客様名：").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="お客様名:").grid(row=1, column=0, sticky="w", pady=5)
         edit_vars['guest'] = tk.StringVar(value=record['guest'])
         ttk.Entry(frame, textvariable=edit_vars['guest'], width=30).grid(row=1, column=1, sticky="w", pady=5)
 
         # チェックイン日
-        ttk.Label(frame, text="チェックイン日：").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="チェックイン日:").grid(row=2, column=0, sticky="w", pady=5)
         checkin_frame = ttk.Frame(frame)
         checkin_frame.grid(row=2, column=1, sticky="w", pady=5)
 
@@ -635,15 +674,23 @@ class HotelCleaningSystem:
         edit_vars['checkin_month'] = tk.StringVar(value=str(record['date'].month))
         edit_vars['checkin_day'] = tk.StringVar(value=str(record['date'].day))
 
-        ttk.Entry(checkin_frame, textvariable=edit_vars['checkin_year'], width=6).pack(side="left")
+        year_entry = ttk.Entry(checkin_frame, textvariable=edit_vars['checkin_year'], width=6)
+        year_entry.pack(side="left")
+        year_entry.bind('<KeyRelease>', self.force_halfwidth_input)
         ttk.Label(checkin_frame, text="年").pack(side="left")
-        ttk.Entry(checkin_frame, textvariable=edit_vars['checkin_month'], width=4).pack(side="left")
+
+        month_entry = ttk.Entry(checkin_frame, textvariable=edit_vars['checkin_month'], width=4)
+        month_entry.pack(side="left")
+        month_entry.bind('<KeyRelease>', self.force_halfwidth_input)
         ttk.Label(checkin_frame, text="月").pack(side="left")
-        ttk.Entry(checkin_frame, textvariable=edit_vars['checkin_day'], width=4).pack(side="left")
+
+        day_entry = ttk.Entry(checkin_frame, textvariable=edit_vars['checkin_day'], width=4)
+        day_entry.pack(side="left")
+        day_entry.bind('<KeyRelease>', self.force_halfwidth_input)
         ttk.Label(checkin_frame, text="日").pack(side="left")
 
         # チェックアウト日
-        ttk.Label(frame, text="チェックアウト日：").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="チェックアウト日:").grid(row=3, column=0, sticky="w", pady=5)
         checkout_frame = ttk.Frame(frame)
         checkout_frame.grid(row=3, column=1, sticky="w", pady=5)
 
@@ -652,31 +699,39 @@ class HotelCleaningSystem:
         edit_vars['checkout_month'] = tk.StringVar(value=str(checkout_date.month))
         edit_vars['checkout_day'] = tk.StringVar(value=str(checkout_date.day))
 
-        ttk.Entry(checkout_frame, textvariable=edit_vars['checkout_year'], width=6).pack(side="left")
+        co_year_entry = ttk.Entry(checkout_frame, textvariable=edit_vars['checkout_year'], width=6)
+        co_year_entry.pack(side="left")
+        co_year_entry.bind('<KeyRelease>', self.force_halfwidth_input)
         ttk.Label(checkout_frame, text="年").pack(side="left")
-        ttk.Entry(checkout_frame, textvariable=edit_vars['checkout_month'], width=4).pack(side="left")
+
+        co_month_entry = ttk.Entry(checkout_frame, textvariable=edit_vars['checkout_month'], width=4)
+        co_month_entry.pack(side="left")
+        co_month_entry.bind('<KeyRelease>', self.force_halfwidth_input)
         ttk.Label(checkout_frame, text="月").pack(side="left")
-        ttk.Entry(checkout_frame, textvariable=edit_vars['checkout_day'], width=4).pack(side="left")
+
+        co_day_entry = ttk.Entry(checkout_frame, textvariable=edit_vars['checkout_day'], width=4)
+        co_day_entry.pack(side="left")
+        co_day_entry.bind('<KeyRelease>', self.force_halfwidth_input)
         ttk.Label(checkout_frame, text="日").pack(side="left")
 
-        # 宿泊日数（自動計算・表示のみ）
-        ttk.Label(frame, text="宿泊日数：").grid(row=4, column=0, sticky="w", pady=5)
+        # 宿泊日数(自動計算・表示のみ)
+        ttk.Label(frame, text="宿泊日数:").grid(row=4, column=0, sticky="w", pady=5)
         days_label = ttk.Label(frame, text=f"{record['days']}日", font=("", 10, "bold"))
         days_label.grid(row=4, column=1, sticky="w", pady=5)
 
         # エコドア
-        ttk.Label(frame, text="オプション：").grid(row=5, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="オプション:").grid(row=5, column=0, sticky="w", pady=5)
         edit_vars['ecodoor'] = tk.BooleanVar(value=record['ecodoor'])
         ttk.Checkbutton(frame, text="エコドア", variable=edit_vars['ecodoor']).grid(row=5, column=1, sticky="w", pady=5)
 
         # エコプラン
-        ttk.Label(frame, text="プラン：").grid(row=6, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="プラン:").grid(row=6, column=0, sticky="w", pady=5)
         edit_vars['ecoplan'] = tk.BooleanVar(value=record['ecoplan'])
         ttk.Checkbutton(frame, text="エコプラン", variable=edit_vars['ecoplan']).grid(row=6, column=1, sticky="w",
                                                                                       pady=5)
 
         # 個別スケジュール編集
-        ttk.Label(frame, text="スケジュール編集：").grid(row=7, column=0, sticky="nw", pady=5)
+        ttk.Label(frame, text="スケジュール編集:").grid(row=7, column=0, sticky="nw", pady=5)
         schedule_frame = ttk.Frame(frame)
         schedule_frame.grid(row=7, column=1, sticky="ew", pady=5)
 
@@ -697,7 +752,7 @@ class HotelCleaningSystem:
 
         # マウスホイールバインド
         def bind_mousewheel(widget):
-            if platform.system() == "Darwin": #mac
+            if platform.system() == "Darwin":  # mac
                 widget.bind("<MouseWheel>", on_mousewheel)
             else:  # Windows/Linux
                 widget.bind("<MouseWheel>", on_mousewheel)
@@ -817,7 +872,7 @@ class HotelCleaningSystem:
                     status_combo['values'] = ('C/I', 'C/O', '〇', '×', 'エコドア')
                     status_combo.grid(row=0, column=2, padx=5, pady=2, sticky="w")
 
-                    # C/IとC/Oは固定（変更不可）
+                    # C/IとC/Oは固定(変更不可)
                     if current_date == checkin or current_date == checkout:
                         status_combo.config(state='disabled')
 
@@ -983,4 +1038,3 @@ class HotelCleaningSystem:
 if __name__ == "__main__":
     app = HotelCleaningSystem()
     app.run()
-
