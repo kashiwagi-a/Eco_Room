@@ -8,6 +8,8 @@ import subprocess
 import platform
 import re
 import csv
+import shutil
+import glob
 
 # IME関連警告を抑制
 if platform.system() == "Darwin":
@@ -18,6 +20,7 @@ class HotelCleaningSystem:
     def __init__(self):
         self.db_file = "hotel_cleaning.db"
         self.excel_file = "hotel_cleaning_now.xlsx"
+        self.backup_prefix = "hotel_cleaning_backup_"
         self.records = []
         self.existing_rooms = set()
 
@@ -219,13 +222,385 @@ class HotelCleaningSystem:
     def create_database_backup_silent(self):
         """サイレントバックアップ作成（メッセージなし）"""
         try:
-            import shutil
-            backup_name = f"hotel_cleaning_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+            backup_name = f"{self.backup_prefix}{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
             shutil.copy2(self.db_file, backup_name)
             return backup_name
         except Exception as e:
             print(f"バックアップエラー: {e}")
             return "作成失敗"
+
+    def get_backup_list(self):
+        """バックアップファイルの一覧を取得"""
+        backup_files = glob.glob(f"{self.backup_prefix}*.db")
+        backup_info = []
+
+        for backup_file in backup_files:
+            try:
+                # ファイル名から日時を抽出
+                filename = os.path.basename(backup_file)
+                date_str = filename.replace(self.backup_prefix, "").replace(".db", "")
+                backup_date = datetime.strptime(date_str, '%Y%m%d_%H%M%S')
+
+                # ファイルサイズを取得
+                file_size = os.path.getsize(backup_file)
+                size_str = self.format_file_size(file_size)
+
+                # バックアップ内の部屋数を取得
+                room_count = self.get_backup_room_count(backup_file)
+
+                backup_info.append({
+                    'filename': backup_file,
+                    'date': backup_date,
+                    'date_str': backup_date.strftime('%Y年%m月%d日 %H:%M:%S'),
+                    'size': size_str,
+                    'room_count': room_count
+                })
+            except Exception as e:
+                print(f"バックアップ情報取得エラー ({backup_file}): {e}")
+                continue
+
+        # 日付の新しい順にソート
+        backup_info.sort(key=lambda x: x['date'], reverse=True)
+        return backup_info
+
+    def format_file_size(self, size_bytes):
+        """ファイルサイズを読みやすい形式に変換"""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        else:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+    def get_backup_room_count(self, backup_file):
+        """バックアップファイル内の部屋数を取得"""
+        try:
+            conn = sqlite3.connect(backup_file)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM rooms")
+            count = cursor.fetchone()[0]
+            conn.close()
+            return count
+        except Exception:
+            return "不明"
+
+    def show_restore_dialog(self):
+        """バックアップ復元ダイアログを表示"""
+        backup_list = self.get_backup_list()
+
+        if not backup_list:
+            messagebox.showinfo("情報", "復元可能なバックアップファイルがありません。")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("バックアップ復元")
+        dialog.geometry("650x650")
+        dialog.minsize(600, 600)
+        dialog.resizable(True, True)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding="15")
+        frame.pack(fill="both", expand=True)
+
+        # タイトル
+        title_label = ttk.Label(frame, text="バックアップからの復元", font=("", 14, "bold"))
+        title_label.pack(pady=(0, 10))
+
+        # 説明
+        info_label = ttk.Label(frame,
+                               text="復元したいバックアップを選択してください。\n"
+                                    "⚠️ 復元を実行すると、現在のデータは上書きされます。",
+                               font=("", 10), justify=tk.CENTER, foreground="red")
+        info_label.pack(pady=(0, 15))
+
+        # バックアップ一覧フレーム
+        list_frame = ttk.LabelFrame(frame, text=f"バックアップ一覧（{len(backup_list)}件）", padding="10")
+        list_frame.pack(fill="both", expand=True, pady=(0, 15))
+
+        # Treeviewでバックアップ一覧を表示
+        columns = ("date", "rooms", "size")
+        tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
+
+        tree.heading("date", text="作成日時")
+        tree.heading("rooms", text="部屋数")
+        tree.heading("size", text="サイズ")
+
+        tree.column("date", width=200, anchor="w")
+        tree.column("rooms", width=80, anchor="center")
+        tree.column("size", width=80, anchor="center")
+
+        # スクロールバー
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+
+        tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # バックアップデータを挿入
+        for backup in backup_list:
+            tree.insert("", "end", values=(
+                backup['date_str'],
+                backup['room_count'],
+                backup['size']
+            ), tags=(backup['filename'],))
+
+        # 選択されたバックアップのファイル名を格納
+        selected_backup = {'filename': None}
+
+        def on_select(event):
+            selection = tree.selection()
+            if selection:
+                item = tree.item(selection[0])
+                selected_backup['filename'] = item['tags'][0]
+
+        tree.bind('<<TreeviewSelect>>', on_select)
+
+        # プレビュー情報フレーム
+        preview_frame = ttk.LabelFrame(frame, text="選択中のバックアップ情報", padding="10")
+        preview_frame.pack(fill="x", pady=(0, 10))
+
+        preview_label = ttk.Label(preview_frame, text="バックアップを選択してください", font=("", 9))
+        preview_label.pack()
+
+        def update_preview(event):
+            selection = tree.selection()
+            if selection:
+                item = tree.item(selection[0])
+                filename = item['tags'][0]
+                for backup in backup_list:
+                    if backup['filename'] == filename:
+                        preview_text = f"ファイル: {backup['filename']}\n"
+                        preview_text += f"作成日時: {backup['date_str']}\n"
+                        preview_text += f"部屋数: {backup['room_count']}件 | サイズ: {backup['size']}"
+                        preview_label.config(text=preview_text)
+                        break
+
+        tree.bind('<<TreeviewSelect>>', lambda e: (on_select(e), update_preview(e)))
+
+        # ボタンフレーム
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(fill="x", pady=(10, 5))
+
+        def restore_backup():
+            if not selected_backup['filename']:
+                messagebox.showwarning("警告", "復元するバックアップを選択してください。")
+                return
+
+            # 確認ダイアログ
+            confirm = messagebox.askyesno(
+                "復元の確認",
+                f"選択したバックアップから復元しますか？\n\n"
+                f"ファイル: {selected_backup['filename']}\n\n"
+                f"⚠️ 現在のデータは完全に上書きされます。\n"
+                f"この操作は取り消せません。",
+                icon='warning'
+            )
+
+            if confirm:
+                success = self.restore_from_backup(selected_backup['filename'])
+                dialog.destroy()
+
+                if success:
+                    messagebox.showinfo("完了", "バックアップからの復元が完了しました。\n\nデータを再読み込みしました。")
+                else:
+                    messagebox.showerror("エラー", "バックアップの復元に失敗しました。")
+
+        def delete_backup():
+            if not selected_backup['filename']:
+                messagebox.showwarning("警告", "削除するバックアップを選択してください。")
+                return
+
+            confirm = messagebox.askyesno(
+                "削除の確認",
+                f"選択したバックアップを削除しますか？\n\n"
+                f"ファイル: {selected_backup['filename']}\n\n"
+                f"この操作は取り消せません。",
+                icon='warning'
+            )
+
+            if confirm:
+                try:
+                    os.remove(selected_backup['filename'])
+                    # 一覧を更新
+                    for item in tree.get_children():
+                        if tree.item(item)['tags'][0] == selected_backup['filename']:
+                            tree.delete(item)
+                            break
+                    selected_backup['filename'] = None
+                    preview_label.config(text="バックアップを選択してください")
+                    messagebox.showinfo("完了", "バックアップを削除しました。")
+                except Exception as e:
+                    messagebox.showerror("エラー", f"バックアップの削除に失敗しました: {e}")
+
+        def browse_backup():
+            """外部のバックアップファイルを選択"""
+            file_path = filedialog.askopenfilename(
+                title="バックアップファイルを選択",
+                filetypes=[("SQLiteデータベース", "*.db"), ("すべてのファイル", "*.*")]
+            )
+
+            if file_path:
+                # 確認ダイアログ
+                confirm = messagebox.askyesno(
+                    "復元の確認",
+                    f"選択したファイルから復元しますか？\n\n"
+                    f"ファイル: {file_path}\n\n"
+                    f"⚠️ 現在のデータは完全に上書きされます。",
+                    icon='warning'
+                )
+
+                if confirm:
+                    success = self.restore_from_backup(file_path)
+                    dialog.destroy()
+
+                    if success:
+                        messagebox.showinfo("完了", "バックアップからの復元が完了しました。")
+                    else:
+                        messagebox.showerror("エラー",
+                                             "バックアップの復元に失敗しました。\nファイル形式が正しいか確認してください。")
+
+        ttk.Button(button_frame, text="復元", command=restore_backup).pack(side="left", padx=5, pady=5)
+        ttk.Button(button_frame, text="削除", command=delete_backup).pack(side="left", padx=5, pady=5)
+        ttk.Button(button_frame, text="ファイルから選択...", command=browse_backup).pack(side="left", padx=5, pady=5)
+        ttk.Button(button_frame, text="閉じる", command=dialog.destroy).pack(side="right", padx=5, pady=5)
+
+        # 下部に余白を追加
+        ttk.Label(frame, text="").pack(pady=5)
+
+    def restore_from_backup(self, backup_file):
+        """バックアップファイルからデータベースを復元"""
+        try:
+            # バックアップファイルの検証
+            test_conn = sqlite3.connect(backup_file)
+            test_cursor = test_conn.cursor()
+
+            # 必要なテーブルが存在するか確認
+            test_cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='rooms'")
+            if not test_cursor.fetchone():
+                test_conn.close()
+                return False
+
+            test_cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='cleaning_schedule'")
+            if not test_cursor.fetchone():
+                test_conn.close()
+                return False
+
+            test_conn.close()
+
+            # 現在の接続を閉じる
+            self.conn.close()
+
+            # 復元前に現在のデータベースのバックアップを作成
+            pre_restore_backup = f"{self.backup_prefix}pre_restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+            shutil.copy2(self.db_file, pre_restore_backup)
+            print(f"復元前バックアップ作成: {pre_restore_backup}")
+
+            # バックアップファイルで上書き
+            shutil.copy2(backup_file, self.db_file)
+
+            # データベースに再接続
+            self.conn = sqlite3.connect(self.db_file)
+
+            # データを再読み込み
+            self.records.clear()
+            self.existing_rooms.clear()
+            self.load_data()
+
+            return True
+
+        except Exception as e:
+            print(f"復元エラー: {e}")
+            # エラー時はデータベースに再接続を試みる
+            try:
+                self.conn = sqlite3.connect(self.db_file)
+            except:
+                pass
+            return False
+
+    def show_backup_management(self):
+        """バックアップ管理メニューを表示"""
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="バックアップから復元...", command=self.show_restore_dialog)
+        menu.add_command(label="今すぐバックアップ作成", command=self.create_manual_backup)
+        menu.add_separator()
+        menu.add_command(label="古いバックアップを削除...", command=self.cleanup_old_backups_dialog)
+
+        # ボタンの位置に表示
+        try:
+            menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+        finally:
+            menu.grab_release()
+
+    def create_manual_backup(self):
+        """手動でバックアップを作成"""
+        backup_name = self.create_database_backup_silent()
+        if backup_name != "作成失敗":
+            messagebox.showinfo("完了", f"バックアップを作成しました。\n\nファイル名: {backup_name}")
+        else:
+            messagebox.showerror("エラー", "バックアップの作成に失敗しました。")
+
+    def cleanup_old_backups_dialog(self):
+        """古いバックアップを削除するダイアログ"""
+        backup_list = self.get_backup_list()
+
+        if len(backup_list) <= 5:
+            messagebox.showinfo("情報",
+                                f"現在のバックアップ数: {len(backup_list)}件\n\n5件以下のため、削除の必要はありません。")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("古いバックアップの削除")
+        dialog.geometry("400x200")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding="20")
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text=f"現在のバックアップ数: {len(backup_list)}件", font=("", 11)).pack(pady=(0, 15))
+
+        ttk.Label(frame, text="保持するバックアップ数を選択してください：").pack()
+
+        keep_var = tk.IntVar(value=10)
+        keep_frame = ttk.Frame(frame)
+        keep_frame.pack(pady=10)
+
+        ttk.Spinbox(keep_frame, from_=1, to=len(backup_list), textvariable=keep_var, width=10).pack(side="left")
+        ttk.Label(keep_frame, text="件（新しい順に保持）").pack(side="left", padx=5)
+
+        def do_cleanup():
+            keep_count = keep_var.get()
+            if keep_count >= len(backup_list):
+                messagebox.showinfo("情報", "削除対象のバックアップがありません。")
+                return
+
+            to_delete = backup_list[keep_count:]
+
+            confirm = messagebox.askyesno(
+                "確認",
+                f"{len(to_delete)}件のバックアップを削除しますか？\n\n"
+                f"最も古いバックアップ: {to_delete[-1]['date_str']}"
+            )
+
+            if confirm:
+                deleted = 0
+                for backup in to_delete:
+                    try:
+                        os.remove(backup['filename'])
+                        deleted += 1
+                    except Exception as e:
+                        print(f"削除エラー: {e}")
+
+                dialog.destroy()
+                messagebox.showinfo("完了", f"{deleted}件のバックアップを削除しました。")
+
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(pady=15)
+
+        ttk.Button(button_frame, text="削除実行", command=do_cleanup).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="キャンセル", command=dialog.destroy).pack(side="left", padx=5)
 
     def setup_gui(self):
         frame = ttk.Frame(self.root, padding="10")
@@ -274,7 +649,7 @@ class HotelCleaningSystem:
         self.vars['ecoplan'] = tk.BooleanVar()
         ttk.Checkbutton(frame, text="エコプラン", variable=self.vars['ecoplan']).grid(row=5, column=1, sticky="w")
 
-        # ボタン（シンプル化）
+        # ボタン（バックアップ復元ボタンを追加）
         btn_frame = ttk.Frame(frame)
         btn_frame.grid(row=6, column=0, columnspan=2, pady=20)
 
@@ -282,6 +657,12 @@ class HotelCleaningSystem:
         ttk.Button(btn_frame, text="エコ票作成", command=self.create_schedule).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="部屋編集", command=self.edit_room).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="CSV読込", command=self.import_csv).pack(side="left", padx=5)
+
+        # 2行目のボタン（バックアップ関連）
+        btn_frame2 = ttk.Frame(frame)
+        btn_frame2.grid(row=7, column=0, columnspan=2, pady=5)
+
+        ttk.Button(btn_frame2, text="バックアップ管理", command=self.show_backup_management).pack(side="left", padx=5)
 
     def filter_numbers(self, event):
         text = self.vars['room'].get()
