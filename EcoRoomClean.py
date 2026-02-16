@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 import os
 import subprocess
 import platform
-import re
 import csv
 import shutil
 import glob
@@ -27,7 +26,7 @@ class HotelCleaningSystem:
         # GUI設定
         self.root = tk.Tk()
         self.root.title("客室清掃管理システム")
-        self.root.geometry("400x350")
+        self.root.geometry("350x200")
 
         self.init_database()
 
@@ -36,6 +35,7 @@ class HotelCleaningSystem:
 
         self.setup_gui()
         self.load_data()
+        self.update_room_count_display()
 
     def startup_cleanup(self):
         """起動時のバックアップ作成とチェックアウト削除"""
@@ -65,29 +65,28 @@ class HotelCleaningSystem:
         """チェックアウト削除用の日付選択ダイアログ"""
         dialog = tk.Toplevel(self.root)
         dialog.title("起動時データ整理")
-        dialog.geometry("450x350")
+        dialog.geometry("500x530")
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
 
-        frame = ttk.Frame(dialog, padding="20")
+        frame = ttk.Frame(dialog, padding="25")
         frame.pack(fill="both", expand=True)
 
         # タイトル
-        title_label = ttk.Label(frame, text="起動時データ整理", font=("", 14, "bold"))
-        title_label.pack(pady=(0, 15))
+        title_label = ttk.Label(frame, text="起動時データ整理", font=("", 16, "bold"))
+        title_label.pack(pady=(0, 10))
 
         # 説明
         info_label = ttk.Label(frame,
                                text="チェックアウト完了の部屋を削除します。\n"
-                                    "指定した日付にC/Oステータスの部屋がデータベースから削除されます。\n"
-                                    "（バックアップは自動で作成済みです）",
-                               font=("", 10), justify=tk.CENTER)
+                                    "清掃日にC/Oステータスの部屋がデータベースから削除されます。",
+                               font=("", 11), justify=tk.CENTER)
         info_label.pack(pady=(0, 20))
 
         # 日付選択
-        date_frame = ttk.LabelFrame(frame, text="チェックアウト日", padding="15")
-        date_frame.pack(fill="x", pady=(0, 20))
+        date_frame = ttk.LabelFrame(frame, text="清掃日", padding="15")
+        date_frame.pack(fill="x", pady=(0, 15))
 
         # デフォルトは今日の日付
         today = datetime.now()
@@ -109,24 +108,12 @@ class HotelCleaningSystem:
         ttk.Entry(date_input_frame, textvariable=checkout_vars['day'], width=4).pack(side="left")
         ttk.Label(date_input_frame, text="日").pack(side="left")
 
-        # 今日の日付ボタン
-        today_frame = ttk.Frame(date_frame)
-        today_frame.pack(pady=(10, 0))
-
-        def set_today():
-            today = datetime.now()
-            checkout_vars['year'].set(str(today.year))
-            checkout_vars['month'].set(str(today.month))
-            checkout_vars['day'].set(str(today.day))
-
-        ttk.Button(today_frame, text="今日の日付", command=set_today).pack()
+        # 削除実行ボタン（清掃日フレーム内）
+        delete_frame = ttk.Frame(date_frame)
+        delete_frame.pack(pady=(10, 0))
 
         # 結果を格納する変数
         result = {'date': None}
-
-        # ボタン
-        button_frame = ttk.Frame(frame)
-        button_frame.pack(fill="x")
 
         def on_ok():
             try:
@@ -140,11 +127,41 @@ class HotelCleaningSystem:
             except ValueError:
                 messagebox.showerror("エラー", "正しい日付を入力してください")
 
-        def on_skip():
-            dialog.destroy()
+        ttk.Button(delete_frame, text="削除実行", command=on_ok, width=14).pack()
 
-        ttk.Button(button_frame, text="削除実行", command=on_ok).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="スキップ", command=on_skip).pack(side="left", padx=5)
+        # --- 操作ボタンエリア ---
+        action_frame = ttk.LabelFrame(frame, text="エコ追加", padding="15")
+        action_frame.pack(fill="x", pady=(0, 15))
+
+        def open_csv_import():
+            dialog.destroy()
+            result['date'] = None
+            self.root.after(100, self.import_csv)
+
+        action_btn_frame = ttk.Frame(action_frame)
+        action_btn_frame.pack(fill="x")
+
+        ttk.Button(action_btn_frame, text="CSV読込", command=open_csv_import, width=14).pack(side="left", padx=8, pady=5)
+
+        # --- 管理機能エリア ---
+        manage_frame = ttk.LabelFrame(frame, text="管理機能", padding="15")
+        manage_frame.pack(fill="x", pady=(0, 10))
+
+        manage_btn_frame = ttk.Frame(manage_frame)
+        manage_btn_frame.pack()
+
+        def open_edit_room():
+            dialog.destroy()
+            result['date'] = None  # スキップ扱い
+            self.root.after(100, self.edit_room)
+
+        def open_backup_management():
+            dialog.destroy()
+            result['date'] = None  # スキップ扱い
+            self.root.after(100, self.show_backup_management)
+
+        ttk.Button(manage_btn_frame, text="部屋編集", command=open_edit_room, width=14).pack(side="left", padx=8, pady=5)
+        ttk.Button(manage_btn_frame, text="バックアップ管理", command=open_backup_management, width=14).pack(side="left", padx=8, pady=5)
 
         # ダイアログが閉じられるまで待機
         dialog.wait_window()
@@ -606,69 +623,53 @@ class HotelCleaningSystem:
         frame = ttk.Frame(self.root, padding="10")
         frame.pack(fill="both", expand=True)
 
-        # 入力フィールド
-        fields = [
-            ("部屋番号", "room"),
-            ("お客様名", "guest"),
-            ("チェックイン日", "date"),
-            ("清掃期間（日）", "days")
-        ]
+        # 登録済み部屋数の表示
+        self.room_count_var = tk.StringVar(value="登録部屋数: 0件")
+        ttk.Label(frame, textvariable=self.room_count_var, font=("", 12)).pack(pady=(10, 5))
 
-        self.vars = {}
-        for i, (label, key) in enumerate(fields):
-            ttk.Label(frame, text=f"{label}：").grid(row=i, column=0, sticky="w", pady=5)
+        # ステータス表示
+        self.status_var = tk.StringVar(value="CSVを読み込んでください")
+        ttk.Label(frame, textvariable=self.status_var, font=("", 10)).pack(pady=(0, 20))
 
-            if key == "date":
-                date_frame = ttk.Frame(frame)
-                date_frame.grid(row=i, column=1, sticky="w")
-                today = datetime.now()
-                self.vars['year'] = tk.StringVar(value=str(today.year))
-                self.vars['month'] = tk.StringVar(value=str(today.month))
-                self.vars['day'] = tk.StringVar(value=str(today.day))
-
-                for var, label_text in [('year', '年'), ('month', '月'), ('day', '日')]:
-                    ttk.Entry(date_frame, textvariable=self.vars[var], width=5).pack(side="left")
-                    ttk.Label(date_frame, text=label_text).pack(side="left")
-            elif key == "days":
-                self.vars[key] = tk.IntVar(value=2)
-                ttk.Spinbox(frame, from_=2, to=999, textvariable=self.vars[key], width=20).grid(row=i, column=1,
-                                                                                                sticky="w")
-            else:
-                self.vars[key] = tk.StringVar()
-                entry = ttk.Entry(frame, textvariable=self.vars[key], width=20)
-                entry.grid(row=i, column=1, sticky="w")
-                if key == "room":
-                    entry.bind('<KeyRelease>', self.filter_numbers)
-
-        # チェックボックス
-        ttk.Label(frame, text="オプション：").grid(row=4, column=0, sticky="w", pady=5)
-        self.vars['ecodoor'] = tk.BooleanVar()
-        ttk.Checkbutton(frame, text="エコドア", variable=self.vars['ecodoor']).grid(row=4, column=1, sticky="w")
-
-        ttk.Label(frame, text="プラン：").grid(row=5, column=0, sticky="w", pady=5)
-        self.vars['ecoplan'] = tk.BooleanVar()
-        ttk.Checkbutton(frame, text="エコプラン", variable=self.vars['ecoplan']).grid(row=5, column=1, sticky="w")
-
-        # ボタン（バックアップ復元ボタンを追加）
+        # ボタン
         btn_frame = ttk.Frame(frame)
-        btn_frame.grid(row=6, column=0, columnspan=2, pady=20)
+        btn_frame.pack(pady=10)
 
-        ttk.Button(btn_frame, text="次の部屋", command=self.add_room).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="エコ票作成", command=self.create_schedule).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="部屋編集", command=self.edit_room).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="CSV読込", command=self.import_csv).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="起動メニュー", command=self.show_startup_menu).pack(side="left", padx=5)
 
-        # 2行目のボタン（バックアップ関連）
-        btn_frame2 = ttk.Frame(frame)
-        btn_frame2.grid(row=7, column=0, columnspan=2, pady=5)
+    def update_room_count_display(self):
+        """登録部屋数の表示を更新"""
+        count = len(self.records)
+        self.room_count_var.set(f"登録部屋数: {count}件")
+        if count > 0:
+            self.status_var.set("「エコ票作成」でExcelを生成できます")
+        else:
+            self.status_var.set("CSVを読み込んでください")
 
-        ttk.Button(btn_frame2, text="バックアップ管理", command=self.show_backup_management).pack(side="left", padx=5)
+    def show_startup_menu(self):
+        """起動メニューを再表示（データ整理・CSV読込・部屋編集・バックアップ）"""
+        checkout_date = self.show_checkout_cleanup_dialog()
 
-    def filter_numbers(self, event):
-        text = self.vars['room'].get()
-        filtered = re.sub(r'[^0-9]', '', text)
-        if text != filtered:
-            self.vars['room'].set(filtered)
+        if checkout_date:
+            deleted_info = self.cleanup_checkout_rooms(checkout_date)
+
+            if deleted_info['total'] > 0:
+                message = f"データ整理が完了しました。\n\n"
+                message += f"✓ 削除された部屋: {deleted_info['total']}件\n"
+                if deleted_info['checkout'] > 0:
+                    message += f"  - チェックアウト完了: {deleted_info['checkout']}件\n"
+                if deleted_info['empty'] > 0:
+                    message += f"  - 空白データ: {deleted_info['empty']}件\n"
+
+                messagebox.showinfo("整理完了", message)
+
+            # データ再読み込み
+            self.records.clear()
+            self.existing_rooms.clear()
+            self.load_data()
+
+        self.update_room_count_display()
 
     def init_database(self):
         self.conn = sqlite3.connect(self.db_file)
@@ -733,63 +734,11 @@ class HotelCleaningSystem:
 
             self.records.append(record)
 
-    def add_room(self):
-        room = self.vars['room'].get().strip()
-        if not room:
-            messagebox.showerror("エラー", "部屋番号を入力してください")
-            return
-
-        if room in self.existing_rooms or any(r['room'] == room for r in self.records):
-            messagebox.showerror("エラー", "この部屋番号は既に登録されています")
-            return
-
-        try:
-            date = datetime(int(self.vars['year'].get()), int(self.vars['month'].get()), int(self.vars['day'].get()))
-        except ValueError:
-            messagebox.showerror("エラー", "正しい日付を入力してください")
-            return
-
-        record = {
-            'room': room,
-            'guest': self.vars['guest'].get().strip(),
-            'date': date,
-            'days': self.vars['days'].get(),
-            'ecodoor': self.vars['ecodoor'].get(),
-            'ecoplan': self.vars['ecoplan'].get(),
-            'schedule': {}
-        }
-
-        # スケジュール生成
-        current = date
-        for day in range(record['days'] + 1):
-            date_str = f"{current.month}/{current.day}"
-            if day == 0:
-                status = "C/I"
-            elif day == record['days']:
-                status = "C/O"
-            else:
-                status = "〇" if day % 3 == 0 else ("エコドア" if record['ecodoor'] else "×")
-
-            record['schedule'][date_str] = status
-            current += timedelta(days=1)
-
-        self.records.append(record)
-        self.existing_rooms.add(room)
-        record['is_new'] = True
-
-        # フォームクリア
-        for key in ['room', 'guest']:
-            self.vars[key].set("")
-        for key in ['ecodoor', 'ecoplan']:
-            self.vars[key].set(False)
-
-        messagebox.showinfo("情報", "部屋が追加されました")
-
     def import_csv(self):
         """CSVファイルを読み込んでエコ清掃対象部屋を選択するダイアログを表示"""
-        # ファイル選択ダイアログ
+        # 部屋状態CSVファイル選択ダイアログ
         file_path = filedialog.askopenfilename(
-            title="CSVファイルを選択",
+            title="部屋状態CSVファイルを選択",
             filetypes=[("CSVファイル", "*.csv"), ("すべてのファイル", "*.*")]
         )
 
@@ -797,7 +746,7 @@ class HotelCleaningSystem:
             return
 
         try:
-            # CSVファイルを読み込み
+            # 部屋状態CSVファイルを読み込み
             eco_rooms = []
             with open(file_path, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
@@ -806,7 +755,7 @@ class HotelCleaningSystem:
                         room_number = row[1]  # 2列目：部屋番号
                         room_status = row[6]  # 7列目：部屋の状態
 
-                        # 状態が'1'または'4'の部屋のみ抽出
+                        # 状態が'1'または'3'の部屋のみ抽出
                         if room_status in ['1', '3']:
                             eco_rooms.append({
                                 'room': room_number,
@@ -814,20 +763,69 @@ class HotelCleaningSystem:
                             })
 
             if not eco_rooms:
-                messagebox.showinfo("情報", "エコ清掃対象の部屋（状態:1または4）が見つかりませんでした。")
+                messagebox.showinfo("情報", "エコ清掃対象の部屋が見つかりませんでした。")
                 return
 
+            # 予約CSVファイル選択ダイアログ（宿泊者名取得用）
+            guest_name_map = {}
+            yoyaku_path = filedialog.askopenfilename(
+                title="予約CSVファイルを選択（宿泊者名取得用・スキップ可）",
+                filetypes=[("CSVファイル", "*.csv"), ("すべてのファイル", "*.*")]
+            )
+
+            if yoyaku_path:
+                guest_name_map = self.load_guest_names_from_yoyaku(yoyaku_path)
+
             # 部屋選択ダイアログを表示
-            self.show_csv_room_selection_dialog(eco_rooms)
+            self.show_csv_room_selection_dialog(eco_rooms, guest_name_map)
 
         except Exception as e:
             messagebox.showerror("エラー", f"CSVファイルの読み込みに失敗しました: {e}")
 
-    def show_csv_room_selection_dialog(self, eco_rooms):
+    def load_guest_names_from_yoyaku(self, file_path):
+        """予約CSVから部屋番号→宿泊者名のマッピングを作成"""
+        guest_map = {}
+        # 複数のエンコーディングを試行
+        encodings = ['cp932', 'shift_jis', 'utf-8']
+
+        for encoding in encodings:
+            try:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    reader = csv.reader(f)
+                    for row in reader:
+                        if len(row) >= 12:
+                            room_number = row[10]  # 11列目：部屋番号
+                            name_field = row[11]   # 12列目：名前＋プラン情報
+
+                            # '_'の手前までが名前
+                            if '_' in name_field:
+                                guest_name = name_field.split('_')[0]
+                            else:
+                                guest_name = name_field
+
+                            # 半角カナを全角カナに変換（可能であれば）
+                            try:
+                                import unicodedata
+                                guest_name = unicodedata.normalize('NFKC', guest_name)
+                            except Exception:
+                                pass
+
+                            guest_map[room_number] = guest_name
+                return guest_map
+            except (UnicodeDecodeError, Exception):
+                continue
+
+        messagebox.showwarning("警告", "予約CSVの読み込みに失敗しました。宿泊者名なしで続行します。")
+        return {}
+
+    def show_csv_room_selection_dialog(self, eco_rooms, guest_name_map=None):
         """CSVから読み込んだ部屋の選択ダイアログを表示"""
+        if guest_name_map is None:
+            guest_name_map = {}
+
         dialog = tk.Toplevel(self.root)
         dialog.title("エコ清掃部屋選択")
-        dialog.geometry("580x700")
+        dialog.geometry("700x700")
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -921,7 +919,7 @@ class HotelCleaningSystem:
         list_frame = ttk.LabelFrame(frame, text="部屋一覧", padding="10")
         list_frame.pack(fill="both", expand=True, pady=(0, 15))
 
-        canvas = tk.Canvas(list_frame, width=500, height=350, bg="white")
+        canvas = tk.Canvas(list_frame, width=620, height=350, bg="white")
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
 
@@ -946,15 +944,17 @@ class HotelCleaningSystem:
         header_frame = ttk.Frame(scrollable_frame)
         header_frame.pack(fill="x", pady=(0, 5))
         ttk.Label(header_frame, text="選択", width=6, font=("", 9, "bold")).pack(side="left", padx=5)
-        ttk.Label(header_frame, text="部屋番号", width=10, font=("", 9, "bold")).pack(side="left", padx=5)
-        ttk.Label(header_frame, text="状態", width=6, font=("", 9, "bold")).pack(side="left", padx=5)
+        ttk.Label(header_frame, text="部屋番号", width=8, font=("", 9, "bold")).pack(side="left", padx=5)
+        ttk.Label(header_frame, text="宿泊者名", width=14, font=("", 9, "bold")).pack(side="left", padx=5)
+        ttk.Label(header_frame, text="状態", width=4, font=("", 9, "bold")).pack(side="left", padx=5)
         ttk.Label(header_frame, text="中日ステータス", width=12, font=("", 9, "bold")).pack(side="left", padx=5)
-        ttk.Label(header_frame, text="登録状況", width=10, font=("", 9, "bold")).pack(side="left", padx=5)
+        ttk.Label(header_frame, text="登録状況", width=8, font=("", 9, "bold")).pack(side="left", padx=5)
 
         # 部屋ごとのチェックボックス
         for room_info in eco_rooms:
             room_number = room_info['room']
             status = room_info['status']
+            guest_name = guest_name_map.get(room_number, '')
 
             row_frame = ttk.Frame(scrollable_frame)
             row_frame.pack(fill="x", pady=2)
@@ -972,8 +972,9 @@ class HotelCleaningSystem:
             if is_existing:
                 cb.config(state='disabled')
 
-            ttk.Label(row_frame, text=room_number, width=10).pack(side="left", padx=5)
-            ttk.Label(row_frame, text=status, width=6).pack(side="left", padx=5)
+            ttk.Label(row_frame, text=room_number, width=8).pack(side="left", padx=5)
+            ttk.Label(row_frame, text=guest_name, width=14, anchor="w").pack(side="left", padx=5)
+            ttk.Label(row_frame, text=status, width=4).pack(side="left", padx=5)
 
             # ステータス選択コンボボックス（デフォルトは「×」）
             status_var = tk.StringVar(value="×")
@@ -984,7 +985,7 @@ class HotelCleaningSystem:
             if is_existing:
                 status_combo.config(state='disabled')
 
-            reg_status_lbl = ttk.Label(row_frame, text=reg_status_text, width=10)
+            reg_status_lbl = ttk.Label(row_frame, text=reg_status_text, width=8)
             reg_status_lbl.pack(side="left", padx=5)
 
             row_frame.bind("<MouseWheel>", on_mousewheel)
@@ -1026,10 +1027,13 @@ class HotelCleaningSystem:
                 middle_status = status_vars[room_number].get()
                 is_ecodoor = (middle_status == "エコドア")
 
+                # 宿泊者名を取得
+                guest_name = guest_name_map.get(room_number, '')
+
                 # 2泊宿泊として登録
                 record = {
                     'room': room_number,
-                    'guest': '',  # 空欄
+                    'guest': guest_name,
                     'date': checkin_date,
                     'days': 2,  # 2泊
                     'ecodoor': is_ecodoor,
@@ -1066,6 +1070,8 @@ class HotelCleaningSystem:
             else:
                 messagebox.showinfo("情報", "新規登録された部屋はありませんでした。")
 
+            self.update_room_count_display()
+
         ttk.Button(button_frame, text="選択した部屋を登録", command=register_rooms).pack(side="left", padx=5)
         ttk.Button(button_frame, text="キャンセル", command=dialog.destroy).pack(side="left", padx=5)
 
@@ -1074,10 +1080,6 @@ class HotelCleaningSystem:
         if not self.records:
             messagebox.showerror("エラー", "記録する部屋がありません")
             return
-
-        # 入力中の部屋があれば追加
-        if self.vars['room'].get().strip():
-            self.add_room()
 
         try:
             # 新しいレコードをデータベース保存
@@ -1112,6 +1114,8 @@ class HotelCleaningSystem:
             # 新しいレコードのフラグをクリア
             for record in self.records:
                 record['is_new'] = False
+
+            self.update_room_count_display()
 
             messagebox.showinfo("完了", f"エコ票を作成しました。\n新規登録: {len(new_records)}件")
 
@@ -1191,13 +1195,7 @@ class HotelCleaningSystem:
 
     def edit_room(self):
         """部屋の編集"""
-        room = self.vars['room'].get().strip()
-
-        if not room:
-            self.show_room_edit_dialog()
-            return
-
-        self.open_edit_dialog(room)
+        self.show_room_edit_dialog()
 
     def show_room_edit_dialog(self):
         """部屋選択ダイアログを表示（編集用）"""
