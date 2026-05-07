@@ -845,9 +845,17 @@ class HotelCleaningSystem:
         try:
             # 部屋状態CSVを読み込み
             eco_rooms = []
+            csv_date = None  # CSV 1行目1列目から取得するチェックイン日
             with open(room_status_path, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
-                for row in reader:
+                for i, row in enumerate(reader):
+                    # 1行目1列目から YYYYMMDD 形式の日付を抽出
+                    if i == 0 and len(row) >= 1 and row[0].isdigit() and len(row[0]) == 8:
+                        try:
+                            csv_date = datetime.strptime(row[0], '%Y%m%d')
+                        except ValueError:
+                            csv_date = None
+
                     if len(row) >= 7:
                         room_number = row[1]  # 2列目：部屋番号
                         room_status = row[6]  # 7列目：部屋の状態
@@ -868,8 +876,29 @@ class HotelCleaningSystem:
             if yoyaku_path:
                 guest_name_map = self.load_guest_names_from_yoyaku(yoyaku_path)
 
+            # CSVの日付（=清掃日）に基づき、古いC/O部屋等を自動削除
+            # 起動時に既にバックアップ作成済みのため、ここでは作成しない
+            if csv_date:
+                deleted_info = self.cleanup_checkout_rooms(csv_date)
+                if deleted_info['total'] > 0:
+                    # データ再読み込み（削除を反映 → 同番号の再来があれば「未登録」扱いになる）
+                    self.records.clear()
+                    self.existing_rooms.clear()
+                    self.load_data()
+                    self.update_room_count_display()
+
+                    message = f"CSVの日付に基づき、データ整理を実施しました。\n\n"
+                    message += f"✓ 削除された部屋: {deleted_info['total']}件\n"
+                    if deleted_info['checkout'] > 0:
+                        message += f"  - チェックアウト完了: {deleted_info['checkout']}件\n"
+                    if deleted_info['empty'] > 0:
+                        message += f"  - 空白データ: {deleted_info['empty']}件\n"
+                    message += f"✓ 清掃日: {csv_date.strftime('%Y年%m月%d日')}"
+
+                    messagebox.showinfo("CSV読込時データ整理", message)
+
             # 部屋選択ダイアログを表示
-            self.show_csv_room_selection_dialog(eco_rooms, guest_name_map)
+            self.show_csv_room_selection_dialog(eco_rooms, guest_name_map, csv_date)
 
         except Exception as e:
             messagebox.showerror("エラー", f"CSVファイルの読み込みに失敗しました: {e}")
@@ -934,7 +963,7 @@ class HotelCleaningSystem:
         messagebox.showwarning("警告", "予約CSVの読み込みに失敗しました。宿泊者名なしで続行します。")
         return {}
 
-    def show_csv_room_selection_dialog(self, eco_rooms, guest_name_map=None):
+    def show_csv_room_selection_dialog(self, eco_rooms, guest_name_map=None, csv_date=None):
         """CSVから読み込んだ部屋の選択ダイアログを表示"""
         if guest_name_map is None:
             guest_name_map = {}
@@ -964,12 +993,12 @@ class HotelCleaningSystem:
         checkin_frame = ttk.LabelFrame(frame, text="チェックイン日", padding="10")
         checkin_frame.pack(fill="x", pady=(0, 10))
 
-        # デフォルトは今日の日付
-        today = datetime.now()
+        # デフォルトはCSV 1行目1列目の日付を優先、なければ今日
+        default_date = csv_date if csv_date else datetime.now()
         checkin_vars = {
-            'year': tk.StringVar(value=str(today.year)),
-            'month': tk.StringVar(value=str(today.month)),
-            'day': tk.StringVar(value=str(today.day))
+            'year': tk.StringVar(value=str(default_date.year)),
+            'month': tk.StringVar(value=str(default_date.month)),
+            'day': tk.StringVar(value=str(default_date.day))
         }
 
         date_input_frame = ttk.Frame(checkin_frame)
@@ -983,25 +1012,6 @@ class HotelCleaningSystem:
 
         ttk.Entry(date_input_frame, textvariable=checkin_vars['day'], width=4).pack(side="left")
         ttk.Label(date_input_frame, text="日").pack(side="left")
-
-        # 日付ショートカットボタン
-        shortcut_frame = ttk.Frame(checkin_frame)
-        shortcut_frame.pack(pady=(5, 0))
-
-        def set_yesterday():
-            yesterday = datetime.now() - timedelta(days=1)
-            checkin_vars['year'].set(str(yesterday.year))
-            checkin_vars['month'].set(str(yesterday.month))
-            checkin_vars['day'].set(str(yesterday.day))
-
-        def set_today():
-            today = datetime.now()
-            checkin_vars['year'].set(str(today.year))
-            checkin_vars['month'].set(str(today.month))
-            checkin_vars['day'].set(str(today.day))
-
-        ttk.Button(shortcut_frame, text="昨日", command=set_yesterday, width=8).pack(side="left", padx=3)
-        ttk.Button(shortcut_frame, text="今日", command=set_today, width=8).pack(side="left", padx=3)
 
         # 全選択/全解除ボタン
         select_frame = ttk.Frame(frame)
