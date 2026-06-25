@@ -22,11 +22,13 @@ class HotelCleaningSystem:
         self.backup_prefix = "hotel_cleaning_backup_"
         self.records = []
         self.existing_rooms = set()
+        # 直前のCSV読込で使った部屋状態CSVのパス（エコ票作成→アーニング表出力の再利用用）
+        self.last_room_status_csv = None
 
         # GUI設定
         self.root = tk.Tk()
         self.root.title("客室清掃管理システム")
-        self.root.geometry("350x200")
+        self.root.geometry("420x200")
 
         self.init_database()
 
@@ -141,7 +143,13 @@ class HotelCleaningSystem:
         action_btn_frame = ttk.Frame(action_frame)
         action_btn_frame.pack(fill="x")
 
+        def open_earning_output():
+            dialog.destroy()
+            result['date'] = None  # スキップ扱い
+            self.root.after(100, self.output_earning_table)
+
         ttk.Button(action_btn_frame, text="CSV読込", command=open_csv_import, width=14).pack(side="left", padx=8, pady=5)
+        ttk.Button(action_btn_frame, text="アーニング表出力", command=open_earning_output, width=14).pack(side="left", padx=8, pady=5)
 
         # --- 管理機能エリア ---
         manage_frame = ttk.LabelFrame(frame, text="管理機能", padding="15")
@@ -453,8 +461,7 @@ class HotelCleaningSystem:
         def browse_backup():
             """外部のバックアップファイルを選択"""
             file_path = filedialog.askopenfilename(
-                title="バックアップファイルを選択",
-                filetypes=[("SQLiteデータベース", "*.db"), ("すべてのファイル", "*.*")]
+                title="バックアップファイルを選択"
             )
 
             if file_path:
@@ -636,6 +643,7 @@ class HotelCleaningSystem:
         btn_frame.pack(pady=10)
 
         ttk.Button(btn_frame, text="エコ票作成", command=self.create_schedule).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="アーニング表出力", command=self.output_earning_table).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="起動メニュー", command=self.show_startup_menu).pack(side="left", padx=5)
 
     def update_room_count_display(self):
@@ -789,16 +797,14 @@ class HotelCleaningSystem:
         """
         # 1ファイル目（必須）
         file1 = filedialog.askopenfilename(
-            title="CSVファイルを選択（部屋状態CSV または 予約CSV）",
-            filetypes=[("CSVファイル", "*.csv"), ("すべてのファイル", "*.*")]
+            title="CSVファイルを選択（部屋状態CSV または 予約CSV）"
         )
         if not file1:
             return
 
         # 2ファイル目（スキップ可）
         file2 = filedialog.askopenfilename(
-            title="もう一方のCSVを選択（スキップ可）",
-            filetypes=[("CSVファイル", "*.csv"), ("すべてのファイル", "*.*")]
+            title="もう一方のCSVを選択（スキップ可）"
         )
 
         # 自動判定して振り分け
@@ -842,6 +848,9 @@ class HotelCleaningSystem:
             )
             return
 
+        # 後でエコ票作成→アーニング表出力に再利用するため、部屋状態CSVのパスを保持
+        self.last_room_status_csv = room_status_path
+
         try:
             # 部屋状態CSVを読み込み
             eco_rooms = []
@@ -860,8 +869,9 @@ class HotelCleaningSystem:
                         room_number = row[1]  # 2列目：部屋番号
                         room_status = row[6]  # 7列目：部屋の状態
 
-                        # 状態が'1'または'3'の部屋のみ抽出
-                        if room_status in ['1', '3']:
+                        # 状態が'3'（在室・連泊中＝エコ清掃対象）の部屋のみ抽出
+                        # ※ '1'=未チェックイン、'0'=空室、'2'=チェックアウト は対象外
+                        if room_status == '3':
                             eco_rooms.append({
                                 'room': room_number,
                                 'status': room_status
@@ -905,6 +915,25 @@ class HotelCleaningSystem:
 
     # エコプラン判定キーワード（半角カナのまま比較するため変換前のフィールドに対して照合）
     ECO_PLAN_KEYWORDS = ['長期ﾏﾝｽﾘｰ', '長期割/ｳｨｰｸﾘｰ']
+
+    # アーニング表【指示書用】への出力区分と表示文字
+    #   vacant  : 状態0  空室
+    #   pre_ci  : 状態1  未チェックイン
+    #   checkout: 状態2  チェックアウト（通常清掃）
+    #   eco     : 状態3 かつ DBでエコ登録あり（ecodoor / ecoplan）
+    #   stay    : 状態3 かつ DBでエコ登録なし（未登録含む）＝連泊
+    EARNING_MARKS = {
+        'vacant':   '×',
+        'pre_ci':   '未C/I',
+        'checkout': 'C/O',
+        'eco':      'エコ清掃',
+        'stay':     '○',
+    }
+
+    # アーニング表テンプレートのファイル名（EcoRoomClean.py と同じフォルダに置く）
+    # この名前で見つからない場合は、同フォルダ内の .xlsx を走査して
+    # 【指示書用】シートを持つものを自動検出する。
+    EARNING_TEMPLATE_NAME = "アーニング表.xlsx"
 
     @staticmethod
     def _is_ecoplan(name_field):
@@ -1304,6 +1333,10 @@ class HotelCleaningSystem:
 
             # Excel ファイルを開く
             self.open_excel()
+
+            # 続けてアーニング表も自動出力する（直前のCSV読込で使った部屋状態CSVを再利用）。
+            # 部屋状態CSVのパスが無い場合は、output_earning_table 内で選択ダイアログが出る。
+            self.output_earning_table(self.last_room_status_csv)
 
         except Exception as e:
             messagebox.showerror("エラー", f"処理中にエラーが発生しました: {e}")
@@ -1809,6 +1842,253 @@ class HotelCleaningSystem:
             schedule[f"{date.month}/{date.day}"] = status
 
         return schedule
+
+    def _find_earning_template(self):
+        """アーニング表テンプレートを自動的に探して、そのパスを返す。
+        見つからなければ None。
+        探索順:
+          1) 既定ファイル名（EARNING_TEMPLATE_NAME）をカレント／スクリプトの
+             フォルダから探す
+          2) 同フォルダ内の .xlsx を走査し、【指示書用】シート（シート名に
+             「指示書」を含む）を2つ以上持つものを自動検出
+        ※ .xlsm（指示書最新版などのマクロ付きファイル）は誤検出を避けるため
+          自動検出の対象から除外する。
+        """
+        # 探索対象フォルダ（カレント と スクリプトと同じフォルダ）
+        search_dirs = []
+        cwd = os.getcwd()
+        search_dirs.append(cwd)
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            if script_dir and script_dir not in search_dirs:
+                search_dirs.append(script_dir)
+        except Exception:
+            pass
+
+        # 1) 既定ファイル名で探す
+        for d in search_dirs:
+            cand = os.path.join(d, self.EARNING_TEMPLATE_NAME)
+            if os.path.exists(cand):
+                return cand
+
+        # 2) .xlsx を走査して【指示書用】シートを持つものを自動検出
+        for d in search_dirs:
+            try:
+                for fname in sorted(os.listdir(d)):
+                    if not fname.lower().endswith('.xlsx'):
+                        continue
+                    path = os.path.join(d, fname)
+                    try:
+                        wb = openpyxl.load_workbook(path, read_only=True)
+                        shidousho = [s for s in wb.sheetnames if '指示書' in s]
+                        wb.close()
+                        if len(shidousho) >= 2:
+                            return path
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+
+        return None
+
+    def _load_db_registered_rooms(self):
+        """DBの rooms テーブルに登録されている部屋番号(int)の集合を返す。
+        ※ 判定方針：状態3の部屋がこの集合に含まれていれば「エコ清掃」、
+          含まれていなければ「○（連泊）」とする。
+          中日ステータスが「×」か「エコドア」かは問わず、登録の有無だけで判定する。"""
+        registered = set()
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT room_number FROM rooms")
+        for (room_number,) in cursor.fetchall():
+            try:
+                registered.add(int(room_number))
+            except (TypeError, ValueError):
+                continue
+        return registered
+
+    def _build_instruction_cell_map(self, wb):
+        """【指示書用】シートを走査し {部屋番号(int): (worksheet, 行, 列)} を返す。
+        シート名に「指示書」を含むシートが対象。列レイアウト(A/D/G)に依存せず、
+        3桁以上の数字セルを部屋番号とみなして検出する。"""
+        cell_map = {}
+        for sheet_name in wb.sheetnames:
+            if '指示書' not in sheet_name:
+                continue
+            ws = wb[sheet_name]
+            for row in ws.iter_rows():
+                for cell in row:
+                    v = cell.value
+                    rn = None
+                    if isinstance(v, int) and v >= 200:
+                        rn = v
+                    elif isinstance(v, str) and v.strip().isdigit() and len(v.strip()) >= 3:
+                        rn = int(v.strip())
+                    if rn is not None:
+                        cell_map[rn] = (ws, cell.row, cell.column)
+        return cell_map
+
+    def output_earning_table(self, csv_path=None):
+        """部屋状態CSVとアーニング表テンプレートから、【指示書用】シートの
+        各部屋番号セルの2つ隣に区分（×／未C/I／C/O／エコ清掃／○）を書き込み、
+        日付入りの別ファイルとして出力して開く。
+
+        csv_path を渡すとそのCSVを使い、CSV選択ダイアログを出さない
+        （エコ票作成からの自動実行で、直前に読み込んだCSVを再利用するため）。
+        渡されない／ファイルが無い場合は、部屋状態CSVの選択ダイアログを表示する。"""
+        # 1) 部屋状態CSVを決定（指定が無ければダイアログ。macOSのグレーアウト回避でフィルタ無し）
+        if not csv_path or not os.path.exists(csv_path):
+            csv_path = filedialog.askopenfilename(
+                title="部屋状態CSVを選択"
+            )
+            if not csv_path:
+                return
+
+        # 部屋状態CSVかどうかを判定
+        if self.detect_csv_type(csv_path) != 'room_status':
+            messagebox.showerror(
+                "エラー",
+                "選択されたファイルは部屋状態CSVではないようです。\n"
+                "状態列を含む部屋状態CSVを選択してください。"
+            )
+            return
+
+        # 2) アーニング表テンプレートを取得
+        #    まず EcoRoomClean.py と同じフォルダから自動検出する。
+        #    見つからない場合のみ、フィルタなしの選択ダイアログを出す。
+        template_path = self._find_earning_template()
+        if not template_path:
+            messagebox.showinfo(
+                "テンプレート選択",
+                f"同じフォルダにアーニング表テンプレート"
+                f"（{self.EARNING_TEMPLATE_NAME}）が見つかりませんでした。\n"
+                "テンプレートのExcelファイルを手動で選択してください。"
+            )
+            template_path = filedialog.askopenfilename(
+                title="アーニング表テンプレートを選択"
+            )
+            if not template_path:
+                return
+
+        try:
+            # CSV読み込み: 部屋番号(int) -> 状態コード、ファイル日付
+            room_status = {}
+            file_date = None
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                for row in csv.reader(f):
+                    if len(row) < 7:
+                        continue
+                    # 1列目の8桁日付をファイル名用に取得
+                    if file_date is None and row[0].isdigit() and len(row[0]) == 8:
+                        file_date = row[0]
+                    raw_room = row[1].strip()
+                    if not raw_room.isdigit():
+                        continue
+                    room_status[int(raw_room)] = row[6].strip()
+
+            if not room_status:
+                messagebox.showerror("エラー", "CSVから部屋データを読み込めませんでした。")
+                return
+
+            # DBに登録されている部屋（状態3はこれに含まれればエコ清掃）
+            db_registered = self._load_db_registered_rooms()
+
+            # テンプレート読み込み & 指示書用セルマップ作成
+            # .xlsm（マクロ有効ブック）の場合は keep_vba=True でマクロを保持する
+            template_ext = os.path.splitext(template_path)[1].lower()
+            is_macro = (template_ext == '.xlsm')
+            try:
+                wb = openpyxl.load_workbook(template_path, keep_vba=is_macro)
+            except Exception as load_err:
+                messagebox.showerror(
+                    "エラー",
+                    "アーニング表テンプレートを開けませんでした。\n\n"
+                    f"ファイル: {os.path.basename(template_path)}\n"
+                    f"原因: {load_err}\n\n"
+                    "次の点を確認してください。\n"
+                    "・拡張子が .xlsx または .xlsm のExcelファイルか\n"
+                    "・そのファイルをExcelで開いたままにしていないか\n"
+                    "・.xls（旧形式）や .xlsb（バイナリ形式）ではないか"
+                )
+                return
+            cell_map = self._build_instruction_cell_map(wb)
+
+            if not cell_map:
+                messagebox.showerror(
+                    "エラー",
+                    "テンプレートから【指示書用】シートの部屋番号を認識できませんでした。\n"
+                    "シート名に「指示書」を含むシートがあるか確認してください。"
+                )
+                wb.close()
+                return
+
+            # 区分ごとのカウンタ
+            counts = {'vacant': 0, 'pre_ci': 0, 'checkout': 0, 'eco': 0, 'stay': 0}
+            unmatched = []   # CSVにあるがテンプレートに無い部屋
+            written = 0
+
+            for room_int, status in room_status.items():
+                if room_int not in cell_map:
+                    unmatched.append(room_int)
+                    continue
+
+                # 状態コード -> 区分判定
+                if status == '0':
+                    key = 'vacant'
+                elif status == '1':
+                    key = 'pre_ci'
+                elif status == '2':
+                    key = 'checkout'
+                elif status == '3':
+                    # 状態3：DBに登録があれば「エコ清掃」、無ければ「○（連泊）」
+                    key = 'eco' if room_int in db_registered else 'stay'
+                else:
+                    # 想定外の状態コードはスキップ
+                    continue
+
+                ws, r, c = cell_map[room_int]
+                ws.cell(r, c + 2, self.EARNING_MARKS[key])  # 番号セルの2つ隣に書き込み
+                counts[key] += 1
+                written += 1
+
+            # 出力ファイル名（日付入り）
+            # 出力ファイル名（日付入り）。テンプレートが.xlsmならマクロ保持のため.xlsmで保存
+            date_part = file_date if file_date else datetime.now().strftime('%Y%m%d')
+            out_ext = '.xlsm' if is_macro else '.xlsx'
+            output_path = f"アーニング表_出力_{date_part}{out_ext}"
+            wb.save(output_path)
+            wb.close()
+
+            # 結果メッセージ
+            msg = "アーニング表を出力しました。\n\n"
+            msg += f"出力ファイル: {output_path}\n"
+            msg += f"書き込み: {written}室\n\n"
+            msg += f"  × 空室: {counts['vacant']}室\n"
+            msg += f"  未C/I 未チェックイン: {counts['pre_ci']}室\n"
+            msg += f"  C/O チェックアウト: {counts['checkout']}室\n"
+            msg += f"  エコ清掃: {counts['eco']}室\n"
+            msg += f"  ○ 連泊: {counts['stay']}室"
+            if unmatched:
+                msg += f"\n\n⚠ テンプレートに無い部屋{len(unmatched)}室はスキップしました:\n  {sorted(unmatched)}"
+
+            messagebox.showinfo("出力完了", msg)
+
+            # 出力ファイルをそのまま開く
+            self.open_file(output_path)
+
+        except Exception as e:
+            messagebox.showerror("エラー", f"アーニング表の出力に失敗しました: {e}")
+
+    def open_file(self, path):
+        """指定したファイルを既定のアプリで開く"""
+        try:
+            if platform.system() == "Darwin":
+                subprocess.call(("open", path))
+            elif platform.system() == "Windows":
+                os.startfile(path)
+            else:
+                subprocess.call(("xdg-open", path))
+        except Exception as e:
+            messagebox.showerror("エラー", f"ファイルを開けませんでした: {e}")
 
     def open_excel(self):
         """エクセルファイルを開く"""
