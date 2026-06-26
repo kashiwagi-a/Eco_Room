@@ -32,7 +32,7 @@ class HotelCleaningSystem:
 
         self.init_database()
 
-        # 起動時にバックアップとチェックアウト削除を実行
+        # 起動時にチェックアウト削除を実行（バックアップは手動）
         self.startup_cleanup()
 
         self.setup_gui()
@@ -40,10 +40,7 @@ class HotelCleaningSystem:
         self.update_room_count_display()
 
     def startup_cleanup(self):
-        """起動時のバックアップ作成とチェックアウト削除"""
-        # バックアップ作成
-        backup_file = self.create_database_backup_silent()
-
+        """起動時のチェックアウト削除（バックアップは手動で行う方針のため自動作成しない）"""
         # チェックアウト削除ダイアログを表示
         checkout_date = self.show_checkout_cleanup_dialog()
 
@@ -58,8 +55,7 @@ class HotelCleaningSystem:
                     message += f"  - チェックアウト完了: {deleted_info['checkout']}件\n"
                 if deleted_info['empty'] > 0:
                     message += f"  - 空白データ: {deleted_info['empty']}件\n"
-                message += f"✓ チェックアウト日: {checkout_date.strftime('%Y年%m月%d日')}\n"
-                message += f"✓ バックアップ: {backup_file}"
+                message += f"✓ チェックアウト日: {checkout_date.strftime('%Y年%m月%d日')}"
 
                 messagebox.showinfo("起動時整理完了", message)
 
@@ -257,14 +253,23 @@ class HotelCleaningSystem:
     def get_backup_list(self):
         """バックアップファイルの一覧を取得"""
         backup_files = glob.glob(f"{self.backup_prefix}*.db")
+        # 手動で付けた任意名のバックアップ(.db)も拾えるよう、カレントの.dbも対象に含める
+        # （ただし運用中のDB本体は除外する）
+        for f in glob.glob("*.db"):
+            if f not in backup_files and os.path.basename(f) != os.path.basename(self.db_file):
+                backup_files.append(f)
         backup_info = []
 
         for backup_file in backup_files:
             try:
-                # ファイル名から日時を抽出
+                # ファイル名から日時を抽出（旧形式 YYYYMMDD_HHMMSS のときのみ成功）
                 filename = os.path.basename(backup_file)
                 date_str = filename.replace(self.backup_prefix, "").replace(".db", "")
-                backup_date = datetime.strptime(date_str, '%Y%m%d_%H%M%S')
+                try:
+                    backup_date = datetime.strptime(date_str, '%Y%m%d_%H%M%S')
+                except ValueError:
+                    # 手動命名など解析できない場合はファイルの更新日時で代替
+                    backup_date = datetime.fromtimestamp(os.path.getmtime(backup_file))
 
                 # ファイルサイズを取得
                 file_size = os.path.getsize(backup_file)
@@ -557,12 +562,62 @@ class HotelCleaningSystem:
             menu.grab_release()
 
     def create_manual_backup(self):
-        """手動でバックアップを作成"""
-        backup_name = self.create_database_backup_silent()
-        if backup_name != "作成失敗":
-            messagebox.showinfo("完了", f"バックアップを作成しました。\n\nファイル名: {backup_name}")
-        else:
-            messagebox.showerror("エラー", "バックアップの作成に失敗しました。")
+        """手動でバックアップを作成（ファイル名はユーザーが入力）"""
+        # ファイル名入力ダイアログ（初期値なし）
+        dialog = tk.Toplevel(self.root)
+        dialog.title("バックアップ作成")
+        dialog.geometry("420x200")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding="20")
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="バックアップのファイル名を入力してください。",
+                  font=("", 11)).pack(pady=(0, 5))
+        ttk.Label(frame, text="（拡張子 .db は自動で付きます）",
+                  font=("", 9), foreground="gray").pack(pady=(0, 12))
+
+        name_var = tk.StringVar(value="")
+        name_entry = ttk.Entry(frame, textvariable=name_var, width=36)
+        name_entry.pack(pady=(0, 15))
+        name_entry.focus_set()
+
+        def do_save():
+            raw = name_var.get().strip()
+            if not raw:
+                messagebox.showwarning("警告", "ファイル名を入力してください。", parent=dialog)
+                return
+
+            # 拡張子 .db を補完
+            filename = raw if raw.lower().endswith(".db") else raw + ".db"
+
+            # 同名ファイルの存在チェック → 上書き確認
+            if os.path.exists(filename):
+                overwrite = messagebox.askyesno(
+                    "上書きの確認",
+                    f"同じ名前のファイルがあります。上書きしますか？\n\nファイル: {filename}",
+                    parent=dialog
+                )
+                if not overwrite:
+                    return
+
+            try:
+                shutil.copy2(self.db_file, filename)
+                dialog.destroy()
+                messagebox.showinfo("完了", f"バックアップを作成しました。\n\nファイル名: {filename}")
+            except Exception as e:
+                messagebox.showerror("エラー", f"バックアップの作成に失敗しました: {e}", parent=dialog)
+
+        button_frame = ttk.Frame(frame)
+        button_frame.pack()
+
+        ttk.Button(button_frame, text="作成", command=do_save).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="キャンセル", command=dialog.destroy).pack(side="left", padx=5)
+
+        # Enterキーで作成
+        name_entry.bind("<Return>", lambda e: do_save())
 
     def cleanup_old_backups_dialog(self):
         """古いバックアップを削除するダイアログ"""
