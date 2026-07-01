@@ -1055,6 +1055,36 @@ class HotelCleaningSystem:
         messagebox.showwarning("警告", "予約CSVの読み込みに失敗しました。宿泊者名なしで続行します。")
         return {}
 
+    def _fit_toplevel_to_screen(self, win, want_w, want_h,
+                                min_w=480, min_h=360, margin=70):
+        """Toplevelウィンドウの初期サイズを画面に収まる範囲に調整して中央寄せする。
+        希望サイズ(want_w × want_h)が画面より大きい場合は自動で縮小するため、
+        画面が小さい端末でも下部のボタンが見切れない。あわせてリサイズ可能にし、
+        最小サイズも設定する。"""
+        try:
+            win.update_idletasks()
+            screen_w = win.winfo_screenwidth()
+            screen_h = win.winfo_screenheight()
+
+            # 画面から余白(margin)を引いた範囲を上限とする
+            max_w = max(min_w, screen_w - margin)
+            max_h = max(min_h, screen_h - margin)
+
+            w = min(want_w, max_w)
+            h = min(want_h, max_h)
+
+            # 中央（やや上寄せ＝タスクバー等を避ける）に配置
+            x = max(0, (screen_w - w) // 2)
+            y = max(0, (screen_h - h) // 3)
+
+            win.geometry(f"{w}x{h}+{x}+{y}")
+            win.resizable(True, True)
+            win.minsize(min(min_w, w), min(min_h, h))
+        except Exception:
+            # 何かあっても最低限サイズだけは設定する
+            win.geometry(f"{want_w}x{want_h}")
+            win.resizable(True, True)
+
     def show_csv_room_selection_dialog(self, eco_rooms, guest_name_map=None, csv_date=None):
         """CSVから読み込んだ部屋の選択ダイアログを表示"""
         if guest_name_map is None:
@@ -1062,10 +1092,10 @@ class HotelCleaningSystem:
 
         dialog = tk.Toplevel(self.root)
         dialog.title("エコ清掃部屋選択")
-        dialog.geometry("840x860")
-        dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
+        # 画面に収まるサイズに自動調整（小さい画面での見切れ防止）＋リサイズ可能に
+        self._fit_toplevel_to_screen(dialog, 840, 860, min_w=560, min_h=420)
 
         # このダイアログ内の文字を大きくする
         row_font = ("", 13)            # 部屋一覧の各行テキスト用
@@ -1139,6 +1169,12 @@ class HotelCleaningSystem:
         def update_count(*args):
             selected = sum(1 for var in check_vars.values() if var.get())
             count_label.config(text=f"選択: {selected}件")
+
+        # 登録／キャンセルボタンの枠を先に最下部へ固定しておく。
+        # （list_frame より前に pack することで、ウィンドウが低くても
+        #   ボタンが見切れず、代わりに一覧側がスクロールで縮む）
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(side="bottom", fill="x", pady=(10, 0))
 
         # スクロール可能なフレーム
         list_frame = ttk.LabelFrame(frame, text="部屋一覧", padding="10")
@@ -1277,10 +1313,7 @@ class HotelCleaningSystem:
         # 初期カウント更新
         update_count()
 
-        # ボタン
-        button_frame = ttk.Frame(frame)
-        button_frame.pack(fill="x")
-
+        # ボタン（枠は上部で最下部固定済み。ここでは中身のボタンだけ追加する）
         def register_rooms():
             """選択された部屋を2泊宿泊として登録"""
             selected_rooms = [room for room, var in check_vars.items() if var.get()]
