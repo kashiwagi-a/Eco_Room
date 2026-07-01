@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import sqlite3
 import openpyxl
+from openpyxl.styles import PatternFill
 from datetime import datetime, timedelta
 import os
 import subprocess
@@ -974,16 +975,23 @@ class HotelCleaningSystem:
     # アーニング表【指示書用】への出力区分と表示文字
     #   vacant  : 状態0  空室
     #   pre_ci  : 状態1  未チェックイン
-    #   checkout: 状態2  チェックアウト（通常清掃）
-    #   eco     : 状態3 かつ DBでエコ登録あり（ecodoor / ecoplan）
-    #   stay    : 状態3 かつ DBでエコ登録なし（未登録含む）＝連泊
+    #   checkout: 状態2  チェックアウト → 空欄（記号なし）
+    #   ecodoor : 状態3 かつ DBで is_ecodoor=True（ドアにエコ札）
+    #   eco     : 状態3 かつ DBに登録あり・エコドア以外 ＝ エコ清掃
+    #   stay    : 状態3 かつ DBに登録なし（未登録含む）＝ 連泊
     EARNING_MARKS = {
         'vacant':   '×',
         'pre_ci':   '未C/I',
-        'checkout': 'C/O',
+        'checkout': '',        # C/O は空欄表示にする
+        'ecodoor':  'エコドア',
         'eco':      'エコ清掃',
         'stay':     '○',
     }
+
+    # エコ清掃・連泊の部屋番号セルを塗る背景色（medium sea green #3cb371）
+    EARNING_GREEN_FILL = PatternFill(
+        start_color="FF3CB371", end_color="FF3CB371", fill_type="solid"
+    )
 
     # アーニング表テンプレートのファイル名（EcoRoomClean.py と同じフォルダに置く）
     # この名前で見つからない場合は、同フォルダ内の .xlsx を走査して
@@ -1054,23 +1062,30 @@ class HotelCleaningSystem:
 
         dialog = tk.Toplevel(self.root)
         dialog.title("エコ清掃部屋選択")
-        dialog.geometry("700x700")
+        dialog.geometry("840x860")
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
+
+        # このダイアログ内の文字を大きくする
+        row_font = ("", 13)            # 部屋一覧の各行テキスト用
+        header_font = ("", 12, "bold") # 一覧ヘッダー用
+        dlg_style = ttk.Style(dialog)
+        dlg_style.configure("Eco.TCheckbutton", font=row_font)
+        dlg_style.configure("Eco.TButton", font=row_font)
 
         frame = ttk.Frame(dialog, padding="15")
         frame.pack(fill="both", expand=True)
 
         # タイトル
-        title_label = ttk.Label(frame, text="エコ清掃対象部屋の選択", font=("", 14, "bold"))
+        title_label = ttk.Label(frame, text="エコ清掃対象部屋の選択", font=("", 18, "bold"))
         title_label.pack(pady=(0, 10))
 
         # 説明
         info_label = ttk.Label(frame,
                                text=f"CSVから{len(eco_rooms)}件のエコ清掃対象部屋が見つかりました。\n"
                                     "チェックを入れた部屋を2泊宿泊として登録します。",
-                               font=("", 10), justify=tk.CENTER)
+                               font=("", 13), justify=tk.CENTER)
         info_label.pack(pady=(0, 10))
 
         # チェックイン日選択
@@ -1114,11 +1129,11 @@ class HotelCleaningSystem:
             for var in check_vars.values():
                 var.set(False)
 
-        ttk.Button(select_frame, text="全選択", command=select_all).pack(side="left", padx=3)
-        ttk.Button(select_frame, text="全解除", command=deselect_all).pack(side="left", padx=3)
+        ttk.Button(select_frame, text="全選択", command=select_all, style="Eco.TButton").pack(side="left", padx=3)
+        ttk.Button(select_frame, text="全解除", command=deselect_all, style="Eco.TButton").pack(side="left", padx=3)
 
         # 選択数表示ラベル
-        count_label = ttk.Label(select_frame, text="選択: 0件")
+        count_label = ttk.Label(select_frame, text="選択: 0件", font=row_font)
         count_label.pack(side="right", padx=5)
 
         def update_count(*args):
@@ -1129,7 +1144,7 @@ class HotelCleaningSystem:
         list_frame = ttk.LabelFrame(frame, text="部屋一覧", padding="10")
         list_frame.pack(fill="both", expand=True, pady=(0, 15))
 
-        canvas = tk.Canvas(list_frame, width=620, height=350, bg="white")
+        canvas = tk.Canvas(list_frame, width=760, height=440, bg="white")
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
 
@@ -1183,7 +1198,7 @@ class HotelCleaningSystem:
 
         # 列幅定数（pixel単位）— ヘッダーと各行で共通使用して列を揃える
         # 順: 選択, 部屋番号, 宿泊者名, 状態, 中日ステータス, 登録状況
-        COL_MINSIZE = (50, 80, 140, 90, 130, 80)
+        COL_MINSIZE = (55, 100, 190, 120, 160, 100)
 
         def _configure_row_columns(frame):
             """全ての行フレームで同じ列幅を共有させる"""
@@ -1195,15 +1210,15 @@ class HotelCleaningSystem:
         header_frame.pack(fill="x", pady=(0, 5))
         _configure_row_columns(header_frame)
 
-        ttk.Label(header_frame, text="選択", font=("", 9, "bold"), anchor="w").grid(row=0, column=0, padx=5, sticky="w")
-        ttk.Label(header_frame, text="部屋番号", font=("", 9, "bold"), anchor="w").grid(row=0, column=1, padx=5, sticky="w")
-        ttk.Label(header_frame, text="宿泊者名", font=("", 9, "bold"), anchor="w").grid(row=0, column=2, padx=5, sticky="w")
-        ttk.Label(header_frame, text="状態", font=("", 9, "bold"), anchor="w").grid(row=0, column=3, padx=5, sticky="w")
-        ttk.Label(header_frame, text="中日ステータス", font=("", 9, "bold"), anchor="w").grid(row=0, column=4, padx=5, sticky="w")
-        ttk.Label(header_frame, text="登録状況", font=("", 9, "bold"), anchor="w").grid(row=0, column=5, padx=5, sticky="w")
+        ttk.Label(header_frame, text="選択", font=header_font, anchor="w").grid(row=0, column=0, padx=5, sticky="w")
+        ttk.Label(header_frame, text="部屋番号", font=header_font, anchor="w").grid(row=0, column=1, padx=5, sticky="w")
+        ttk.Label(header_frame, text="宿泊者名", font=header_font, anchor="w").grid(row=0, column=2, padx=5, sticky="w")
+        ttk.Label(header_frame, text="状態", font=header_font, anchor="w").grid(row=0, column=3, padx=5, sticky="w")
+        ttk.Label(header_frame, text="中日ステータス", font=header_font, anchor="w").grid(row=0, column=4, padx=5, sticky="w")
+        ttk.Label(header_frame, text="登録状況", font=header_font, anchor="w").grid(row=0, column=5, padx=5, sticky="w")
 
         # 部屋ごとのチェックボックス
-        for room_info in eco_rooms:
+        for idx, room_info in enumerate(eco_rooms):
             room_number = room_info['room']
             status = room_info['status']
             guest_info = guest_name_map.get(room_number, {})
@@ -1235,21 +1250,29 @@ class HotelCleaningSystem:
             if is_existing:
                 cb.config(state='disabled')
 
-            ttk.Label(row_frame, text=room_number, anchor="w").grid(row=0, column=1, padx=5, sticky="w")
-            ttk.Label(row_frame, text=guest_name, anchor="w").grid(row=0, column=2, padx=5, sticky="w")
-            ttk.Label(row_frame, text=display_status, anchor="w").grid(row=0, column=3, padx=5, sticky="w")
+            ttk.Label(row_frame, text=room_number, anchor="w", font=row_font).grid(row=0, column=1, padx=5, sticky="w")
+            ttk.Label(row_frame, text=guest_name, anchor="w", font=row_font).grid(row=0, column=2, padx=5, sticky="w")
+            ttk.Label(row_frame, text=display_status, anchor="w", font=row_font).grid(row=0, column=3, padx=5, sticky="w")
 
-            # ステータス選択コンボボックス（デフォルトは「×」）
-            status_var = tk.StringVar(value="×")
-            status_vars[room_number] = status_var
-            status_combo = ttk.Combobox(row_frame, textvariable=status_var, width=10, state="readonly")
-            status_combo['values'] = ('×', 'エコドア')
-            status_combo.grid(row=0, column=4, padx=5, sticky="w")
+            # エコドア指定チェックボックス（デフォルトはOFF＝「×」）
+            # ※コンボボックスはホイールで値が変わる事故があったためチェックボックスに変更
+            ecodoor_var = tk.BooleanVar(value=False)
+            status_vars[room_number] = ecodoor_var
+            ecodoor_cb = ttk.Checkbutton(row_frame, text="エコドア", variable=ecodoor_var,
+                                         style="Eco.TCheckbutton")
+            ecodoor_cb.grid(row=0, column=4, padx=5, sticky="w")
             if is_existing:
-                status_combo.config(state='disabled')
+                ecodoor_cb.config(state='disabled')
 
-            reg_status_lbl = ttk.Label(row_frame, text=reg_status_text, anchor="w")
+            reg_status_lbl = ttk.Label(row_frame, text=reg_status_text, anchor="w", font=row_font)
             reg_status_lbl.grid(row=0, column=5, padx=5, sticky="w")
+
+            # 2部屋ごとに区切り線を引いて見やすくする
+            # （最後の行の後ろには線を入れない）
+            if (idx + 1) % 2 == 0 and (idx + 1) < len(eco_rooms):
+                ttk.Separator(scrollable_frame, orient="horizontal").pack(
+                    fill="x", padx=2, pady=3
+                )
 
         # 初期カウント更新
         update_count()
@@ -1284,9 +1307,9 @@ class HotelCleaningSystem:
                 if room_number in self.existing_rooms or any(r['room'] == room_number for r in self.records):
                     continue
 
-                # 選択されたステータスを取得
-                middle_status = status_vars[room_number].get()
-                is_ecodoor = (middle_status == "エコドア")
+                # 選択されたステータスを取得（チェックボックス: ON=エコドア / OFF=×）
+                is_ecodoor = bool(status_vars[room_number].get())
+                middle_status = "エコドア" if is_ecodoor else "×"
 
                 # 宿泊者名を取得
                 guest_info = guest_name_map.get(room_number, {})
@@ -1338,8 +1361,8 @@ class HotelCleaningSystem:
 
             self.update_room_count_display()
 
-        ttk.Button(button_frame, text="選択した部屋を登録", command=register_rooms).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="キャンセル",
+        ttk.Button(button_frame, text="選択した部屋を登録", command=register_rooms, style="Eco.TButton").pack(side="left", padx=5)
+        ttk.Button(button_frame, text="キャンセル", style="Eco.TButton",
                    command=lambda: (cleanup_bindings(), dialog.destroy())).pack(side="left", padx=5)
 
     def create_schedule(self):
@@ -1947,19 +1970,26 @@ class HotelCleaningSystem:
         return None
 
     def _load_db_registered_rooms(self):
-        """DBの rooms テーブルに登録されている部屋番号(int)の集合を返す。
-        ※ 判定方針：状態3の部屋がこの集合に含まれていれば「エコ清掃」、
-          含まれていなければ「○（連泊）」とする。
-          中日ステータスが「×」か「エコドア」かは問わず、登録の有無だけで判定する。"""
+        """DBの rooms テーブルに登録されている部屋番号(int)について
+        (登録済み集合, エコドア集合) のタプルを返す。
+
+        ※ 判定方針：状態3の部屋が登録済み集合に含まれていれば
+          「エコドア」か「エコ清掃」、含まれていなければ「○（連泊）」。
+          さらに is_ecodoor=True の部屋は「エコドア」、それ以外の
+          登録部屋は「エコ清掃」として区別する。"""
         registered = set()
+        ecodoor = set()
         cursor = self.conn.cursor()
-        cursor.execute("SELECT room_number FROM rooms")
-        for (room_number,) in cursor.fetchall():
+        cursor.execute("SELECT room_number, is_ecodoor FROM rooms")
+        for room_number, is_ecodoor in cursor.fetchall():
             try:
-                registered.add(int(room_number))
+                rn = int(room_number)
             except (TypeError, ValueError):
                 continue
-        return registered
+            registered.add(rn)
+            if is_ecodoor:
+                ecodoor.add(rn)
+        return registered, ecodoor
 
     def _build_instruction_cell_map(self, wb):
         """【指示書用】シートを走査し {部屋番号(int): (worksheet, 行, 列)} を返す。
@@ -2044,8 +2074,8 @@ class HotelCleaningSystem:
                 messagebox.showerror("エラー", "CSVから部屋データを読み込めませんでした。")
                 return
 
-            # DBに登録されている部屋（状態3はこれに含まれればエコ清掃）
-            db_registered = self._load_db_registered_rooms()
+            # DBに登録されている部屋（状態3はこれに含まれればエコドアorエコ清掃）
+            db_registered, db_ecodoor = self._load_db_registered_rooms()
 
             # テンプレート読み込み & 指示書用セルマップ作成
             # .xlsm（マクロ有効ブック）の場合は keep_vba=True でマクロを保持する
@@ -2077,7 +2107,8 @@ class HotelCleaningSystem:
                 return
 
             # 区分ごとのカウンタ
-            counts = {'vacant': 0, 'pre_ci': 0, 'checkout': 0, 'eco': 0, 'stay': 0}
+            counts = {'vacant': 0, 'pre_ci': 0, 'checkout': 0,
+                      'ecodoor': 0, 'eco': 0, 'stay': 0}
             unmatched = []   # CSVにあるがテンプレートに無い部屋
             written = 0
 
@@ -2094,14 +2125,26 @@ class HotelCleaningSystem:
                 elif status == '2':
                     key = 'checkout'
                 elif status == '3':
-                    # 状態3：DBに登録があれば「エコ清掃」、無ければ「○（連泊）」
-                    key = 'eco' if room_int in db_registered else 'stay'
+                    # 状態3：DB登録あり → エコドア(is_ecodoor) / エコ清掃、
+                    #        登録なし → ○（連泊）
+                    if room_int in db_registered:
+                        key = 'ecodoor' if room_int in db_ecodoor else 'eco'
+                    else:
+                        key = 'stay'
                 else:
                     # 想定外の状態コードはスキップ
                     continue
 
                 ws, r, c = cell_map[room_int]
-                ws.cell(r, c + 2, self.EARNING_MARKS[key])  # 番号セルの2つ隣に書き込み
+                mark_cell = ws.cell(r, c + 2, self.EARNING_MARKS[key])  # 番号セルの2つ隣に書き込み
+
+                # エコ清掃・連泊は部屋番号セルを #3cb371 で色付け
+                if key in ('eco', 'stay'):
+                    ws.cell(r, c).fill = self.EARNING_GREEN_FILL
+                # エコ清掃・エコドアは記号欄（「エコ清掃」「エコドア」）も #3cb371 で色付け
+                if key in ('eco', 'ecodoor'):
+                    mark_cell.fill = self.EARNING_GREEN_FILL
+
                 counts[key] += 1
                 written += 1
 
@@ -2119,7 +2162,8 @@ class HotelCleaningSystem:
             msg += f"書き込み: {written}室\n\n"
             msg += f"  × 空室: {counts['vacant']}室\n"
             msg += f"  未C/I 未チェックイン: {counts['pre_ci']}室\n"
-            msg += f"  C/O チェックアウト: {counts['checkout']}室\n"
+            msg += f"  （空欄）チェックアウト: {counts['checkout']}室\n"
+            msg += f"  エコドア: {counts['ecodoor']}室\n"
             msg += f"  エコ清掃: {counts['eco']}室\n"
             msg += f"  ○ 連泊: {counts['stay']}室"
             if unmatched:
