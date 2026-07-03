@@ -2,7 +2,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import sqlite3
 import openpyxl
-from openpyxl.styles import PatternFill
+from openpyxl.styles import PatternFill, Font
+from openpyxl.cell.rich_text import CellRichText, TextBlock
+from openpyxl.cell.text import InlineFont
 from datetime import datetime, timedelta
 import os
 import subprocess
@@ -969,8 +971,8 @@ class HotelCleaningSystem:
         except Exception as e:
             messagebox.showerror("エラー", f"CSVファイルの読み込みに失敗しました: {e}")
 
-    # エコプラン判定キーワード（半角カナのまま比較するため変換前のフィールドに対して照合）
-    ECO_PLAN_KEYWORDS = ['長期ﾏﾝｽﾘｰ', '長期割/ｳｨｰｸﾘｰ']
+    # エコプラン判定キーワード（NFKCで正規化してから部分一致で判定）
+    ECO_PLAN_KEYWORDS = ['長期', 'ウィークリー', 'マンスリー', 'エコ']
 
     # アーニング表【指示書用】への出力区分と表示文字
     #   vacant  : 状態0  空室
@@ -985,7 +987,7 @@ class HotelCleaningSystem:
         'checkout': '',        # C/O は空欄表示にする
         'ecodoor':  'エコドア',
         'eco':      'エコ清掃',
-        'stay':     '○',
+        'stay':     '',        # 連泊は空欄表示（部屋番号セルの緑色塗りは維持）
     }
 
     # エコ清掃・連泊の部屋番号セルを塗る背景色（medium sea green #3cb371）
@@ -1003,13 +1005,22 @@ class HotelCleaningSystem:
         """12列目（名前＋プラン情報）からエコプラン該当かを判定"""
         if not name_field:
             return False
-        # 日本語キーワード（部分一致）
+
+        # 半角カナ・全角英数などをNFKCで正規化してから判定する。
+        # これにより 'ﾏﾝｽﾘｰ'→'マンスリー'、'ｳｨｰｸﾘｰ'→'ウィークリー' となり、
+        # 半角／全角どちらの表記でもヒットする。
+        import unicodedata
+        normalized = unicodedata.normalize('NFKC', name_field)
+
+        # 日本語・カタカナキーワード（部分一致）
         for kw in HotelCleaningSystem.ECO_PLAN_KEYWORDS:
-            if kw in name_field:
+            if kw in normalized:
                 return True
-        # ECO は大文字小文字を無視して判定
-        if 'ECO' in name_field.upper():
+
+        # Eco / ECO / eco / Ｅｃｏ を大文字小文字を無視して判定
+        if 'ECO' in normalized.upper():
             return True
+
         return False
 
     def load_guest_names_from_yoyaku(self, file_path):
@@ -1027,8 +1038,8 @@ class HotelCleaningSystem:
                             room_number = row[10]  # 11列目：部屋番号
                             name_field = row[11]   # 12列目：名前＋プラン情報
 
-                            # エコプラン判定は変換前のフィールドに対して行う
-                            # （'長期ﾏﾝｽﾘｰ' などの半角カナをそのまま含むため）
+                            # エコプラン判定（_is_ecoplan内部でNFKC正規化するため、
+                            # 半角カナの元フィールドをそのまま渡してよい）
                             is_ecoplan = self._is_ecoplan(name_field)
 
                             # '_'の手前までが名前
@@ -2045,6 +2056,130 @@ class HotelCleaningSystem:
                         cell_map[rn] = (ws, cell.row, cell.column)
         return cell_map
 
+    # 階見出しサマリーのフォントサイズ（結合セル幅に収めるため少し小さめ）
+    FLOOR_SUMMARY_FONT_SIZE = 12
+    # 階数（○F）部分のフォント設定（見やすく大きめ・別フォント）
+    FLOOR_LABEL_FONT_NAME = 'メイリオ'
+    FLOOR_LABEL_FONT_SIZE = 14
+    # 階数の前後に入れる空き（全角スペース2つ分）
+    FLOOR_LABEL_GAP = '　　'
+
+    def _write_floor_summaries(self, wb, room_class):
+        """【指示書用】シートの各階見出しセル（「2階」など）を、その階の
+        部屋情報「S:n,Tn,丸数字　○F　空室:n」の表記に書き換える。
+        例：エコが3室なら「S:16,T1,③　3F　空室:10」
+
+        ・S/T … 在室中（○連泊）・チェックアウト(C/O)・未C/Iの部屋を
+          カウントする。空室・エコ清掃・エコドアは含めない。
+          部屋タイプ（S, NS, T, NT, D, ND, ANS, ANT, AND など）の
+          末尾文字で判定し、D（ダブル）はシングル(S)に含める。
+        ・丸数字 … eco部屋数＝「エコ清掃」＋「エコドア」の合計を
+          ①②③…の丸数字で表示（0のときは⓪）
+        ・空室 … 区分「×（状態0）」になった部屋数
+        ・○F  … 元の見出し「2階」を「2F」表記に変換して中央に配置
+
+        room_class: {部屋番号(int): 区分キー('eco','vacant','stay'など)}
+        ※ 部屋は「同じ列で直上にある階見出し」に割り当てるため、
+          列レイアウト(A/D/G)が変わっても動作する。
+        """
+        import re
+        heading_pat = re.compile(r'^\d+階$')
+
+        for sheet_name in wb.sheetnames:
+            if '指示書' not in sheet_name:
+                continue
+            ws = wb[sheet_name]
+
+            headings = []   # (列, 行)
+            rooms = []      # (列, 行, 部屋番号int)
+            for row in ws.iter_rows():
+                for cell in row:
+                    v = cell.value
+                    if isinstance(v, str) and heading_pat.match(v.strip()):
+                        headings.append((cell.column, cell.row))
+                        continue
+                    rn = None
+                    if isinstance(v, int) and v >= 200:
+                        rn = v
+                    elif isinstance(v, str) and v.strip().isdigit() and len(v.strip()) >= 3:
+                        rn = int(v.strip())
+                    if rn is not None:
+                        rooms.append((cell.column, cell.row, rn))
+
+            # 各部屋を「同じ列で直上にある見出し」に割り当てて集計
+            stats = {}  # (列, 行) -> カウンタ
+            for col, r, rn in rooms:
+                cands = [h for h in headings if h[0] == col and h[1] < r]
+                if not cands:
+                    continue
+                hk = max(cands, key=lambda x: x[1])
+                st = stats.setdefault(hk, {'S': 0, 'T': 0,
+                                           'eco': 0, 'vacant': 0})
+                # 当日の区分を取得
+                key = room_class.get(rn)
+
+                # S/T … 在室中（○連泊）・チェックアウト・未C/Iの部屋を
+                # カウントする。空室・エコ清掃・エコドアは含めない。
+                # 部屋タイプは部屋番号の右隣セルの末尾文字で判定し、
+                # D（ダブル）はシングル(S)に含める。
+                if key in ('stay', 'checkout', 'pre_ci'):
+                    t = ws.cell(r, col + 1).value
+                    if isinstance(t, str) and t.strip():
+                        last = t.strip().upper()[-1]
+                        if last in ('S', 'D'):
+                            st['S'] += 1
+                        elif last == 'T':
+                            st['T'] += 1
+
+                # eco（丸数字）＝エコ清掃＋エコドア、空室＝×（状態0）
+                if key in ('eco', 'ecodoor'):
+                    st['eco'] += 1
+                elif key == 'vacant':
+                    st['vacant'] += 1
+
+            # 見出しセルに書き込み（例：「S:16,T1,③　　3F　　空室:10」）
+            # eco数は丸数字（①②③…）で表示し、
+            # 階数（○F）だけをリッチテキストで大きく・別フォントにする
+            for (col, r), st in stats.items():
+                cell = ws.cell(r, col)
+                base = str(cell.value).strip() if cell.value else ''
+                # 「2階」→「2F」表記に変換
+                m = heading_pat.match(base)
+                floor_label = f"{base[:-1]}F" if m else base
+                eco_mark = self._circled_number(st['eco'])
+                left = f"S:{st['S']},T{st['T']},{eco_mark}{self.FLOOR_LABEL_GAP}"
+                right = f"{self.FLOOR_LABEL_GAP}空室:{st['vacant']}"
+                small_font = InlineFont(sz=self.FLOOR_SUMMARY_FONT_SIZE, b=True)
+                big_font = InlineFont(rFont=self.FLOOR_LABEL_FONT_NAME,
+                                      sz=self.FLOOR_LABEL_FONT_SIZE, b=True)
+                cell.value = CellRichText(
+                    TextBlock(small_font, left),
+                    TextBlock(big_font, floor_label),
+                    TextBlock(small_font, right),
+                )
+                # ベースのセルフォント（リッチテキストが効かない環境向けの保険）
+                f = cell.font
+                cell.font = Font(name=f.name, bold=True,
+                                 size=self.FLOOR_SUMMARY_FONT_SIZE)
+                # 大きくした階数フォントが縦に切れないよう行の高さを確保
+                need_h = self.FLOOR_LABEL_FONT_SIZE + 8
+                cur_h = ws.row_dimensions[r].height
+                if cur_h is None or cur_h < need_h:
+                    ws.row_dimensions[r].height = need_h
+
+    @staticmethod
+    def _circled_number(n):
+        """0〜50を丸数字（⓪①②…⑳㉑…㊿）に変換する。範囲外は数字のまま返す"""
+        if n == 0:
+            return '⓪'
+        if 1 <= n <= 20:
+            return chr(0x2460 + n - 1)   # ①〜⑳
+        if 21 <= n <= 35:
+            return chr(0x3251 + n - 21)  # ㉑〜㉟
+        if 36 <= n <= 50:
+            return chr(0x32B1 + n - 36)  # ㊱〜㊿
+        return str(n)
+
     def output_earning_table(self, csv_path=None):
         """部屋状態CSVとアーニング表テンプレートから、【指示書用】シートの
         各部屋番号セルの2つ隣に区分（×／未C/I／C/O／エコ清掃／○）を書き込み、
@@ -2142,6 +2277,7 @@ class HotelCleaningSystem:
             # 区分ごとのカウンタ
             counts = {'vacant': 0, 'pre_ci': 0, 'checkout': 0,
                       'ecodoor': 0, 'eco': 0, 'stay': 0}
+            room_class = {}  # 部屋番号(int) -> 区分キー（階別サマリー用）
             unmatched = []   # CSVにあるがテンプレートに無い部屋
             written = 0
 
@@ -2171,15 +2307,19 @@ class HotelCleaningSystem:
                 ws, r, c = cell_map[room_int]
                 mark_cell = ws.cell(r, c + 2, self.EARNING_MARKS[key])  # 番号セルの2つ隣に書き込み
 
-                # エコ清掃・連泊は部屋番号セルを #3cb371 で色付け
-                if key in ('eco', 'stay'):
+                # エコ清掃・エコドア・連泊は部屋番号セルを #3cb371 で色付け
+                if key in ('eco', 'ecodoor', 'stay'):
                     ws.cell(r, c).fill = self.EARNING_GREEN_FILL
                 # エコ清掃・エコドアは記号欄（「エコ清掃」「エコドア」）も #3cb371 で色付け
                 if key in ('eco', 'ecodoor'):
                     mark_cell.fill = self.EARNING_GREEN_FILL
 
                 counts[key] += 1
+                room_class[room_int] = key
                 written += 1
+
+            # 各階見出しセルに部屋情報サマリー（S/T/D・エコ・空室）を追記
+            self._write_floor_summaries(wb, room_class)
 
             # 出力ファイル名（日付入り）
             # 出力ファイル名（日付入り）。テンプレートが.xlsmならマクロ保持のため.xlsmで保存
@@ -2198,7 +2338,8 @@ class HotelCleaningSystem:
             msg += f"  （空欄）チェックアウト: {counts['checkout']}室\n"
             msg += f"  エコドア: {counts['ecodoor']}室\n"
             msg += f"  エコ清掃: {counts['eco']}室\n"
-            msg += f"  ○ 連泊: {counts['stay']}室"
+            msg += f"  （空欄・緑色）連泊: {counts['stay']}室"
+            msg += "\n\n各階見出しに部屋情報（在室S/T・eco丸数字・空室）を書き込みました。"
             if unmatched:
                 msg += f"\n\n⚠ テンプレートに無い部屋{len(unmatched)}室はスキップしました:\n  {sorted(unmatched)}"
 
