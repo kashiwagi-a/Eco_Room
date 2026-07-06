@@ -805,9 +805,22 @@ class HotelCleaningSystem:
 
         Returns:
             'room_status': 部屋状態CSV (utf-8/ASCII, 8桁日付+部屋番号で始まる)
-            'yoyaku'    : 予約CSV (cp932/shift_jis, 12列以上)
+            'yoyaku'    : 予約CSV (cp932/shift_jis, 12列以上, 202605292形式)
+            'yoyaku_co' : 予約詳細CSV (cp932/shift_jis, 202605291形式,
+                          5列目=C/I日・6列目=C/O日が8桁日付・7列目=泊数)
             'unknown'   : 判定不能
         """
+
+        def classify_yoyaku(row):
+            """12列以上のCSV行を 'yoyaku_co' / 'yoyaku' に振り分ける"""
+            # 202605291形式: 列4(5列目)=チェックイン日, 列5(6列目)=チェックアウト日
+            # がともに8桁日付で、列6(7列目)が泊数（数字）
+            if (len(row) >= 7
+                    and row[4].strip().isdigit() and len(row[4].strip()) == 8
+                    and row[5].strip().isdigit() and len(row[5].strip()) == 8
+                    and row[6].strip().isdigit()):
+                return 'yoyaku_co'
+            return 'yoyaku'
         # ① まず utf-8 で開けるか試す（部屋状態CSVは数字とASCIIのみ）
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -825,7 +838,7 @@ class HotelCleaningSystem:
 
                 # utf-8で読めて12列以上なら予約CSV(レアケース)
                 if len(first_row) >= 12:
-                    return 'yoyaku'
+                    return classify_yoyaku(first_row)
 
                 return 'unknown'
 
@@ -843,7 +856,7 @@ class HotelCleaningSystem:
                     if first_row is None:
                         continue
                     if len(first_row) >= 12:
-                        return 'yoyaku'
+                        return classify_yoyaku(first_row)
             except (UnicodeDecodeError, Exception):
                 continue
 
@@ -851,32 +864,46 @@ class HotelCleaningSystem:
 
     def import_csv(self):
         """CSVファイルを読み込んでエコ清掃対象部屋を選択するダイアログを表示。
-        部屋状態CSV と 予約CSV はどちらの順番で選択しても自動で振り分ける。
+        部屋状態CSV・予約CSV・予約詳細CSV(C/O日入り) はどの順番で選択しても
+        自動で振り分ける。
         """
         # 1ファイル目（必須）
         file1 = filedialog.askopenfilename(
-            title="CSVファイルを選択（部屋状態CSV または 予約CSV）"
+            title="CSVファイルを選択（部屋状態CSV / 予約CSV / 予約詳細CSV）"
         )
         if not file1:
             return
 
         # 2ファイル目（スキップ可）
         file2 = filedialog.askopenfilename(
-            title="もう一方のCSVを選択（スキップ可）"
+            title="2つ目のCSVを選択（スキップ可）"
         )
+
+        # 3ファイル目（スキップ可）※2つ目をスキップした場合は聞かない
+        file3 = None
+        if file2:
+            file3 = filedialog.askopenfilename(
+                title="3つ目のCSVを選択（スキップ可）"
+            )
 
         # 自動判定して振り分け
         room_status_path = None
         yoyaku_path = None
+        yoyaku_co_path = None  # 202605291形式（C/O日・泊数入り）
 
-        for path in filter(None, [file1, file2]):
+        kind_names = {
+            'room_status': '部屋状態CSV',
+            'yoyaku': '予約CSV',
+            'yoyaku_co': '予約詳細CSV（C/O日入り）',
+        }
+
+        for path in filter(None, [file1, file2, file3]):
             kind = self.detect_csv_type(path)
             if kind == 'room_status':
                 if room_status_path:
                     messagebox.showerror(
                         "エラー",
-                        "部屋状態CSVが2つ選択されています。\n"
-                        "片方は予約CSVを選んでください。"
+                        "部屋状態CSVが2つ選択されています。"
                     )
                     return
                 room_status_path = path
@@ -884,25 +911,34 @@ class HotelCleaningSystem:
                 if yoyaku_path:
                     messagebox.showerror(
                         "エラー",
-                        "予約CSVが2つ選択されています。\n"
-                        "片方は部屋状態CSVを選んでください。"
+                        "予約CSVが2つ選択されています。"
                     )
                     return
                 yoyaku_path = path
+            elif kind == 'yoyaku_co':
+                if yoyaku_co_path:
+                    messagebox.showerror(
+                        "エラー",
+                        "予約詳細CSV（C/O日入り）が2つ選択されています。"
+                    )
+                    return
+                yoyaku_co_path = path
             else:
                 messagebox.showerror(
                     "エラー",
                     f"ファイル形式を判定できませんでした:\n"
                     f"{os.path.basename(path)}\n\n"
-                    "部屋状態CSV または 予約CSV を選択してください。"
+                    "部屋状態CSV / 予約CSV / 予約詳細CSV を選択してください。"
                 )
                 return
 
         if not room_status_path:
+            selected = [kind_names[self.detect_csv_type(p)]
+                        for p in filter(None, [file1, file2, file3])]
             messagebox.showerror(
                 "エラー",
                 "部屋状態CSVが必要です。\n"
-                "選択されたファイルは予約CSVだけのようです。"
+                f"選択されたファイル: {', '.join(selected) if selected else 'なし'}"
             )
             return
 
@@ -939,10 +975,17 @@ class HotelCleaningSystem:
                 messagebox.showinfo("情報", "エコ清掃対象の部屋が見つかりませんでした。")
                 return
 
-            # 予約CSVから宿泊者名取得（あれば）
+            # 予約詳細CSV(202605291形式)から 予約番号→(C/O日, 泊数) のマップ作成（あれば）
+            checkout_map = {}
+            if yoyaku_co_path:
+                checkout_map = self.load_checkout_map(yoyaku_co_path)
+
+            # 予約CSVから宿泊者名取得（あれば）。checkout_mapを渡すと
+            # 予約番号をキーに部屋ごとのC/O日・泊数も紐づける
             guest_name_map = {}
             if yoyaku_path:
-                guest_name_map = self.load_guest_names_from_yoyaku(yoyaku_path)
+                guest_name_map = self.load_guest_names_from_yoyaku(
+                    yoyaku_path, checkout_map)
 
             # CSVの日付（=清掃日）に基づき、古いC/O部屋等を自動削除
             # 起動時に既にバックアップ作成済みのため、ここでは作成しない
@@ -1023,8 +1066,53 @@ class HotelCleaningSystem:
 
         return False
 
-    def load_guest_names_from_yoyaku(self, file_path):
-        """予約CSVから部屋番号→{'name', 'is_ecoplan'} のマッピングを作成"""
+    def load_checkout_map(self, file_path):
+        """予約詳細CSV(202605291形式)から
+        {予約番号: (チェックアウト日datetime, 泊数int)} のマップを作成。
+
+        列構成: 列0=予約番号, 列4=チェックイン日, 列5=チェックアウト日(6列目),
+                列6=泊数(7列目)。同一予約番号は複数行あるがC/O日は同一
+        （前回検証済み: 食い違い0件）なので単純な辞書でよい。
+        """
+        co_map = {}
+        encodings = ['cp932', 'shift_jis', 'utf-8']
+
+        for encoding in encodings:
+            try:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    for row in csv.reader(f):
+                        if len(row) < 7 or not row[0].strip().isdigit():
+                            continue
+                        co_raw = row[5].strip()
+                        if not (co_raw.isdigit() and len(co_raw) == 8):
+                            continue
+                        try:
+                            co_date = datetime.strptime(co_raw, '%Y%m%d')
+                        except ValueError:
+                            continue
+                        nights_raw = row[6].strip()
+                        nights = int(nights_raw) if nights_raw.isdigit() else None
+                        co_map[row[0].strip()] = (co_date, nights)
+                return co_map
+            except (UnicodeDecodeError, Exception):
+                continue
+
+        messagebox.showwarning(
+            "警告",
+            "予約詳細CSV（C/O日入り）の読み込みに失敗しました。\n"
+            "チェックアウト日なしで続行します。"
+        )
+        return {}
+
+    def load_guest_names_from_yoyaku(self, file_path, checkout_map=None):
+        """予約CSVから部屋番号→{'name', 'is_ecoplan', 'checkout', 'nights'}
+        のマッピングを作成。
+
+        checkout_map（予約番号→(C/O日, 泊数)）が渡された場合は、
+        予約番号（列0）をキーに各部屋へC/O日と泊数を紐づける。
+        """
+        if checkout_map is None:
+            checkout_map = {}
         guest_map = {}
         # 複数のエンコーディングを試行
         encodings = ['cp932', 'shift_jis', 'utf-8']
@@ -1035,6 +1123,7 @@ class HotelCleaningSystem:
                     reader = csv.reader(f)
                     for row in reader:
                         if len(row) >= 12:
+                            yoyaku_no = row[0].strip()  # 1列目：予約番号
                             room_number = row[10]  # 11列目：部屋番号
                             name_field = row[11]   # 12列目：名前＋プラン情報
 
@@ -1055,9 +1144,15 @@ class HotelCleaningSystem:
                             except Exception:
                                 pass
 
+                            # 予約番号からC/O日・泊数を引く（無ければNone）
+                            co_date, nights = checkout_map.get(
+                                yoyaku_no, (None, None))
+
                             guest_map[room_number] = {
                                 'name': guest_name,
                                 'is_ecoplan': is_ecoplan,
+                                'checkout': co_date,   # datetime or None
+                                'nights': nights,      # int or None
                             }
                 return guest_map
             except (UnicodeDecodeError, Exception):
@@ -1106,7 +1201,7 @@ class HotelCleaningSystem:
         dialog.transient(self.root)
         dialog.grab_set()
         # 画面に収まるサイズに自動調整（小さい画面での見切れ防止）＋リサイズ可能に
-        self._fit_toplevel_to_screen(dialog, 840, 860, min_w=560, min_h=420)
+        self._fit_toplevel_to_screen(dialog, 900, 860, min_w=560, min_h=420)
 
         # このダイアログ内の文字を大きくする
         row_font = ("", 13)            # 部屋一覧の各行テキスト用
@@ -1125,7 +1220,8 @@ class HotelCleaningSystem:
         # 説明
         info_label = ttk.Label(frame,
                                text=f"CSVから{len(eco_rooms)}件のエコ清掃対象部屋が見つかりました。\n"
-                                    "チェックを入れた部屋を2泊宿泊として登録します。",
+                                    "チェックを入れた部屋を登録します"
+                                    "（C/O日あり→実泊数／なし→2泊）。",
                                font=("", 13), justify=tk.CENTER)
         info_label.pack(pady=(0, 10))
 
@@ -1191,7 +1287,7 @@ class HotelCleaningSystem:
         list_frame = ttk.LabelFrame(frame, text="部屋一覧", padding="10")
         list_frame.pack(fill="both", expand=True, pady=(0, 15))
 
-        canvas = tk.Canvas(list_frame, width=760, height=440, bg="white")
+        canvas = tk.Canvas(list_frame, width=800, height=440, bg="white")
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
 
@@ -1244,8 +1340,8 @@ class HotelCleaningSystem:
         scrollbar.pack(side="right", fill="y")
 
         # 列幅定数（pixel単位）— ヘッダーと各行で共通使用して列を揃える
-        # 順: 選択, 部屋番号, 宿泊者名, 状態, 中日ステータス, 登録状況
-        COL_MINSIZE = (55, 100, 190, 120, 160, 100)
+        # 順: 選択, 部屋番号, 宿泊者名, C/O, 状態, 中日ステータス, 登録状況
+        COL_MINSIZE = (55, 100, 170, 80, 110, 160, 100)
 
         def _configure_row_columns(frame):
             """全ての行フレームで同じ列幅を共有させる"""
@@ -1260,9 +1356,10 @@ class HotelCleaningSystem:
         ttk.Label(header_frame, text="選択", font=header_font, anchor="w").grid(row=0, column=0, padx=5, sticky="w")
         ttk.Label(header_frame, text="部屋番号", font=header_font, anchor="w").grid(row=0, column=1, padx=5, sticky="w")
         ttk.Label(header_frame, text="宿泊者名", font=header_font, anchor="w").grid(row=0, column=2, padx=5, sticky="w")
-        ttk.Label(header_frame, text="状態", font=header_font, anchor="w").grid(row=0, column=3, padx=5, sticky="w")
-        ttk.Label(header_frame, text="中日ステータス", font=header_font, anchor="w").grid(row=0, column=4, padx=5, sticky="w")
-        ttk.Label(header_frame, text="登録状況", font=header_font, anchor="w").grid(row=0, column=5, padx=5, sticky="w")
+        ttk.Label(header_frame, text="C/O", font=header_font, anchor="w").grid(row=0, column=3, padx=5, sticky="w")
+        ttk.Label(header_frame, text="状態", font=header_font, anchor="w").grid(row=0, column=4, padx=5, sticky="w")
+        ttk.Label(header_frame, text="中日ステータス", font=header_font, anchor="w").grid(row=0, column=5, padx=5, sticky="w")
+        ttk.Label(header_frame, text="登録状況", font=header_font, anchor="w").grid(row=0, column=6, padx=5, sticky="w")
 
         # 部屋ごとのチェックボックス
         for idx, room_info in enumerate(eco_rooms):
@@ -1273,9 +1370,15 @@ class HotelCleaningSystem:
             if isinstance(guest_info, dict):
                 guest_name = guest_info.get('name', '')
                 is_ecoplan_guest = guest_info.get('is_ecoplan', False)
+                checkout_date = guest_info.get('checkout')
             else:
                 guest_name = guest_info or ''
                 is_ecoplan_guest = False
+                checkout_date = None
+
+            # C/O列の表示（例: 6/1）。C/O日が取れていない部屋は空欄
+            checkout_text = (f"{checkout_date.month}/{checkout_date.day}"
+                             if checkout_date else '')
 
             # 「状態」列の表示：エコプラン該当者は「エコプラン」、非該当者は空欄
             display_status = 'エコプラン' if is_ecoplan_guest else ''
@@ -1299,7 +1402,8 @@ class HotelCleaningSystem:
 
             ttk.Label(row_frame, text=room_number, anchor="w", font=row_font).grid(row=0, column=1, padx=5, sticky="w")
             ttk.Label(row_frame, text=guest_name, anchor="w", font=row_font).grid(row=0, column=2, padx=5, sticky="w")
-            ttk.Label(row_frame, text=display_status, anchor="w", font=row_font).grid(row=0, column=3, padx=5, sticky="w")
+            ttk.Label(row_frame, text=checkout_text, anchor="w", font=row_font).grid(row=0, column=3, padx=5, sticky="w")
+            ttk.Label(row_frame, text=display_status, anchor="w", font=row_font).grid(row=0, column=4, padx=5, sticky="w")
 
             # エコドア指定チェックボックス（デフォルトはOFF＝「×」）
             # ※コンボボックスはホイールで値が変わる事故があったためチェックボックスに変更
@@ -1307,12 +1411,12 @@ class HotelCleaningSystem:
             status_vars[room_number] = ecodoor_var
             ecodoor_cb = ttk.Checkbutton(row_frame, text="エコドア", variable=ecodoor_var,
                                          style="Eco.TCheckbutton")
-            ecodoor_cb.grid(row=0, column=4, padx=5, sticky="w")
+            ecodoor_cb.grid(row=0, column=5, padx=5, sticky="w")
             if is_existing:
                 ecodoor_cb.config(state='disabled')
 
             reg_status_lbl = ttk.Label(row_frame, text=reg_status_text, anchor="w", font=row_font)
-            reg_status_lbl.grid(row=0, column=5, padx=5, sticky="w")
+            reg_status_lbl.grid(row=0, column=6, padx=5, sticky="w")
 
             # 2部屋ごとに区切り線を引いて見やすくする
             # （最後の行の後ろには線を入れない）
@@ -1355,35 +1459,52 @@ class HotelCleaningSystem:
                 is_ecodoor = bool(status_vars[room_number].get())
                 middle_status = "エコドア" if is_ecodoor else "×"
 
-                # 宿泊者名を取得
+                # 宿泊者名・C/O日を取得
                 guest_info = guest_name_map.get(room_number, {})
                 if isinstance(guest_info, dict):
                     guest_name = guest_info.get('name', '')
+                    checkout_date = guest_info.get('checkout')
                 else:
                     guest_name = guest_info or ''
+                    checkout_date = None
 
-                # 2泊宿泊として登録
+                # 泊数の決定：
+                #   予約詳細CSVからC/O日が取れていれば
+                #   「登録起点日（=清掃日）〜C/O日」で実際の残り日数を使う。
+                #   取れていない場合は従来どおり2泊固定。
+                if checkout_date and checkout_date > checkin_date:
+                    days = (checkout_date - checkin_date).days
+                else:
+                    days = 2
+
                 record = {
                     'room': room_number,
                     'guest': guest_name,
                     'date': checkin_date,
-                    'days': 2,  # 2泊
+                    'days': days,
                     'ecodoor': is_ecodoor,
                     'ecoplan': False,
                     'schedule': {},
                     'is_new': True
                 }
 
-                # スケジュール生成（2泊）
+                # スケジュール生成
+                #   day 0        : C/I（登録起点日）
+                #   最終日       : C/O
+                #   中日         : 3日に1回は通常清掃「〇」、
+                #                  それ以外はエコ日（エコドア指定なら「エコドア」、
+                #                  指定なしは「×」）
                 current = checkin_date
-                for day in range(3):  # 0=C/I, 1=中日, 2=C/O
+                for day in range(days + 1):
                     date_str = f"{current.month}/{current.day}"
                     if day == 0:
                         status = "C/I"
-                    elif day == 2:
+                    elif day == days:
                         status = "C/O"
+                    elif day % 3 == 0:
+                        status = "〇"  # 3日に1回の通常清掃
                     else:
-                        status = middle_status  # 選択されたステータスを使用
+                        status = middle_status  # エコドア or ×
 
                     record['schedule'][date_str] = status
                     current += timedelta(days=1)
@@ -1397,8 +1518,10 @@ class HotelCleaningSystem:
 
             if registered_count > 0:
                 messagebox.showinfo("完了",
-                                    f"{registered_count}件の部屋を2泊宿泊として登録しました。\n"
-                                    f"チェックイン日: {checkin_date.strftime('%Y年%m月%d日')}\n\n"
+                                    f"{registered_count}件の部屋を登録しました。\n"
+                                    f"登録起点日: {checkin_date.strftime('%Y年%m月%d日')}\n"
+                                    "（C/O日が取れた部屋は実際の泊数、"
+                                    "取れなかった部屋は2泊で登録）\n\n"
                                     "「エコ票作成」ボタンでExcelを生成してください。")
             else:
                 messagebox.showinfo("情報", "新規登録された部屋はありませんでした。")
