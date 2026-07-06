@@ -1035,7 +1035,7 @@ class HotelCleaningSystem:
 
     # エコ清掃・連泊の部屋番号セルを塗る背景色（medium sea green #3cb371）
     EARNING_GREEN_FILL = PatternFill(
-        start_color="FF3CB371", end_color="FF3CB371", fill_type="solid"
+        start_color="FFC6EFCE", end_color="FFC6EFCE", fill_type="solid"
     )
 
     # アーニング表テンプレートのファイル名（EcoRoomClean.py と同じフォルダに置く）
