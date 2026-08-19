@@ -31,7 +31,9 @@ class HotelCleaningSystem:
         # GUI設定
         self.root = tk.Tk()
         self.root.title("客室清掃管理システム")
-        self.root.geometry("420x200")
+        # ボタン4つ（エコ票作成／アーニング表出力／エコ部屋リスト／起動メニュー）
+        # が横並びで見切れない幅を確保する
+        self.root.geometry("560x200")
 
         self.init_database()
 
@@ -66,7 +68,8 @@ class HotelCleaningSystem:
         """チェックアウト削除用の日付選択ダイアログ"""
         dialog = tk.Toplevel(self.root)
         dialog.title("起動時データ整理")
-        dialog.geometry("500x530")
+        # 並び順: CSV読込（メイン）→ 出力 → 削除機能（手動）→ 管理機能
+        dialog.geometry("560x660")
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -78,16 +81,53 @@ class HotelCleaningSystem:
         title_label = ttk.Label(frame, text="起動時データ整理", font=("", 16, "bold"))
         title_label.pack(pady=(0, 10))
 
-        # 説明
-        info_label = ttk.Label(frame,
-                               text="チェックアウト完了の部屋を削除します。\n"
-                                    "清掃日にC/Oステータスの部屋がデータベースから削除されます。",
-                               font=("", 11), justify=tk.CENTER)
-        info_label.pack(pady=(0, 20))
+        # 結果を格納する変数
+        result = {'date': None}
 
-        # 日付選択
-        date_frame = ttk.LabelFrame(frame, text="清掃日", padding="15")
+        # --- メイン：CSV読込（独立エリア） ---
+        csv_frame = ttk.LabelFrame(frame, text="エコ追加", padding="15")
+        csv_frame.pack(fill="x", pady=(0, 15))
+
+        ttk.Label(csv_frame,
+                  text="部屋状態CSVを読み込んで部屋を登録します。\n"
+                       "読込時にC/O部屋の自動削除（CSV日付の翌日基準）も行われます。",
+                  font=("", 10), justify=tk.CENTER).pack(pady=(0, 8))
+
+        def open_csv_import():
+            dialog.destroy()
+            result['date'] = None
+            self.root.after(100, self.import_csv)
+
+        ttk.Button(csv_frame, text="CSV読込", command=open_csv_import,
+                   width=20).pack()
+
+        # --- 出力エリア ---
+        output_frame = ttk.LabelFrame(frame, text="出力", padding="15")
+        output_frame.pack(fill="x", pady=(0, 15))
+
+        output_btn_frame = ttk.Frame(output_frame)
+        output_btn_frame.pack()
+
+        def open_earning_output():
+            dialog.destroy()
+            result['date'] = None  # スキップ扱い
+            self.root.after(100, self.output_earning_table)
+
+        def open_eco_room_list():
+            dialog.destroy()
+            result['date'] = None  # スキップ扱い
+            self.root.after(100, self.show_eco_room_list_dialog)
+
+        ttk.Button(output_btn_frame, text="アーニング表出力", command=open_earning_output, width=14).pack(side="left", padx=8, pady=5)
+        ttk.Button(output_btn_frame, text="エコ部屋リスト", command=open_eco_room_list, width=14).pack(side="left", padx=8, pady=5)
+
+        # --- 削除機能エリア（手動） ---
+        date_frame = ttk.LabelFrame(frame, text="C/O部屋の削除（手動）", padding="15")
         date_frame.pack(fill="x", pady=(0, 15))
+
+        ttk.Label(date_frame,
+                  text="CSVを読まない日の整理用。指定日以前にC/Oの部屋を削除します。",
+                  font=("", 10), justify=tk.CENTER).pack(pady=(0, 8))
 
         # デフォルトは今日の日付
         today = datetime.now()
@@ -109,13 +149,6 @@ class HotelCleaningSystem:
         ttk.Entry(date_input_frame, textvariable=checkout_vars['day'], width=4).pack(side="left")
         ttk.Label(date_input_frame, text="日").pack(side="left")
 
-        # 削除実行ボタン（清掃日フレーム内）
-        delete_frame = ttk.Frame(date_frame)
-        delete_frame.pack(pady=(10, 0))
-
-        # 結果を格納する変数
-        result = {'date': None}
-
         def on_ok():
             try:
                 checkout_date = datetime(
@@ -128,27 +161,9 @@ class HotelCleaningSystem:
             except ValueError:
                 messagebox.showerror("エラー", "正しい日付を入力してください")
 
+        delete_frame = ttk.Frame(date_frame)
+        delete_frame.pack(pady=(10, 0))
         ttk.Button(delete_frame, text="削除実行", command=on_ok, width=14).pack()
-
-        # --- 操作ボタンエリア ---
-        action_frame = ttk.LabelFrame(frame, text="エコ追加", padding="15")
-        action_frame.pack(fill="x", pady=(0, 15))
-
-        def open_csv_import():
-            dialog.destroy()
-            result['date'] = None
-            self.root.after(100, self.import_csv)
-
-        action_btn_frame = ttk.Frame(action_frame)
-        action_btn_frame.pack(fill="x")
-
-        def open_earning_output():
-            dialog.destroy()
-            result['date'] = None  # スキップ扱い
-            self.root.after(100, self.output_earning_table)
-
-        ttk.Button(action_btn_frame, text="CSV読込", command=open_csv_import, width=14).pack(side="left", padx=8, pady=5)
-        ttk.Button(action_btn_frame, text="アーニング表出力", command=open_earning_output, width=14).pack(side="left", padx=8, pady=5)
 
         # --- 管理機能エリア ---
         manage_frame = ttk.LabelFrame(frame, text="管理機能", padding="15")
@@ -702,6 +717,7 @@ class HotelCleaningSystem:
 
         ttk.Button(btn_frame, text="エコ票作成", command=self.create_schedule).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="アーニング表出力", command=self.output_earning_table).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="エコ部屋リスト", command=self.show_eco_room_list_dialog).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="起動メニュー", command=self.show_startup_menu).pack(side="left", padx=5)
 
     def update_room_count_display(self):
@@ -1004,10 +1020,15 @@ class HotelCleaningSystem:
                 guest_name_map = self.load_guest_names_from_yoyaku(
                     yoyaku_path, checkout_map)
 
-            # CSVの日付（=清掃日）に基づき、古いC/O部屋等を自動削除
+            # CSVの日付（=清掃日）の「翌日」を基準に、C/O部屋等を自動削除する。
+            # 従来は翌朝の「削除実行」（起動時データ整理）で行っていた削除を
+            # 読み込み時点で済ませる（翌朝C/Oの部屋もここで消える。
+            # そのため当日のアーニング表ではC/O=翌日の部屋は連泊扱いになる）。
+            # 誤ったCSVを読み込んだ場合はバックアップ管理から復元する。
             # 起動時に既にバックアップ作成済みのため、ここでは作成しない
             if csv_date:
-                deleted_info = self.cleanup_checkout_rooms(csv_date)
+                cleanup_date = csv_date + timedelta(days=1)
+                deleted_info = self.cleanup_checkout_rooms(cleanup_date)
                 if deleted_info['total'] > 0:
                     # データ再読み込み（削除を反映 → 同番号の再来があれば「未登録」扱いになる）
                     self.records.clear()
@@ -1021,7 +1042,9 @@ class HotelCleaningSystem:
                         message += f"  - チェックアウト完了: {deleted_info['checkout']}件\n"
                     if deleted_info['empty'] > 0:
                         message += f"  - 空白データ: {deleted_info['empty']}件\n"
-                    message += f"✓ 清掃日: {csv_date.strftime('%Y年%m月%d日')}"
+                    message += f"✓ 清掃日: {csv_date.strftime('%Y年%m月%d日')}\n"
+                    message += (f"✓ 削除基準日: {cleanup_date.strftime('%Y年%m月%d日')}"
+                                "（清掃日の翌日。C/Oがこの日以前の部屋を削除）")
 
                     messagebox.showinfo("CSV読込時データ整理", message)
 
@@ -1036,7 +1059,24 @@ class HotelCleaningSystem:
 
     # 中日ステータスの選択肢（プルダウン用）
     NO_CLEAN_LABEL = '清掃不要・アメ不要'
-    MIDDLE_STATUS_CHOICES = ('×', 'エコドア', NO_CLEAN_LABEL)
+    # 通常清掃（エコ対象に選ばなかった在室部屋）を表す中日ステータス。
+    # ・チェックなしで自動登録された部屋 → 実C/I日起点の3日周期で〇
+    # ・全日設定でこの値を明示選択した部屋 → 毎日清掃（全中日に〇）
+    # どちらもアーニング表では従来どおり「連泊(stay)」扱いにする
+    # （_load_db_registered_rooms で登録済み集合から除外している）。
+    NORMAL_CLEAN_LABEL = '通常清掃'
+    MIDDLE_STATUS_CHOICES = ('×', 'エコドア', NO_CLEAN_LABEL, NORMAL_CLEAN_LABEL)
+
+    # エコ清掃扱いの中日ステータス（判定用）
+    ECO_MIDDLE_STATUSES = ('×', 'エコドア', NO_CLEAN_LABEL)
+
+    # 通常清掃の周期（日）と、清掃日に立てる記号。
+    # 実C/I日を起点に NORMAL_CLEAN_CYCLE 日ごと（+3, +6, +9 …）に〇を立て、
+    # それ以外の中日は cleaning_schedule に行を作らない（＝エコ票では空欄）。
+    # 空文字ステータスの行を作ると cleanup_checkout_rooms の削除対象に
+    # なってしまうため、非清掃日は「行なし」で表現すること。
+    NORMAL_CLEAN_CYCLE = 3
+    NORMAL_CLEAN_MARK = '〇'
 
     # アーニング表【指示書用】への出力区分と表示文字
     #   vacant  : 状態0  空室
@@ -1092,11 +1132,15 @@ class HotelCleaningSystem:
 
     def load_checkout_map(self, file_path):
         """予約詳細CSV(202605291形式)から
-        {予約番号: (チェックアウト日datetime, 泊数int)} のマップを作成。
+        {予約番号: (チェックイン日datetime, チェックアウト日datetime, 泊数int)}
+        のマップを作成。
 
-        列構成: 列0=予約番号, 列4=チェックイン日, 列5=チェックアウト日(6列目),
+        列構成: 列0=予約番号, 列4=チェックイン日(5列目), 列5=チェックアウト日(6列目),
                 列6=泊数(7列目)。同一予約番号は複数行あるがC/O日は同一
         （前回検証済み: 食い違い0件）なので単純な辞書でよい。
+
+        C/I日は通常清掃の3日周期（実C/I日起点）の計算に使う。
+        読めなかった場合は None を返し、呼び出し側で登録起点日にフォールバックする。
         """
         co_map = {}
         encodings = ['cp932', 'shift_jis', 'utf-8']
@@ -1114,9 +1158,17 @@ class HotelCleaningSystem:
                             co_date = datetime.strptime(co_raw, '%Y%m%d')
                         except ValueError:
                             continue
+                        # C/I日（列4）は取れないこともあるので個別に判定する
+                        ci_raw = row[4].strip()
+                        ci_date = None
+                        if ci_raw.isdigit() and len(ci_raw) == 8:
+                            try:
+                                ci_date = datetime.strptime(ci_raw, '%Y%m%d')
+                            except ValueError:
+                                ci_date = None
                         nights_raw = row[6].strip()
                         nights = int(nights_raw) if nights_raw.isdigit() else None
-                        co_map[row[0].strip()] = (co_date, nights)
+                        co_map[row[0].strip()] = (ci_date, co_date, nights)
                 return co_map
             except (UnicodeDecodeError, Exception):
                 continue
@@ -1129,11 +1181,11 @@ class HotelCleaningSystem:
         return {}
 
     def load_guest_names_from_yoyaku(self, file_path, checkout_map=None):
-        """予約CSVから部屋番号→{'name', 'is_ecoplan', 'checkout', 'nights'}
+        """予約CSVから部屋番号→{'name', 'is_ecoplan', 'checkin', 'checkout', 'nights'}
         のマッピングを作成。
 
-        checkout_map（予約番号→(C/O日, 泊数)）が渡された場合は、
-        予約番号（列0）をキーに各部屋へC/O日と泊数を紐づける。
+        checkout_map（予約番号→(C/I日, C/O日, 泊数)）が渡された場合は、
+        予約番号（列0）をキーに各部屋へC/I日・C/O日・泊数を紐づける。
         """
         if checkout_map is None:
             checkout_map = {}
@@ -1168,13 +1220,14 @@ class HotelCleaningSystem:
                             except Exception:
                                 pass
 
-                            # 予約番号からC/O日・泊数を引く（無ければNone）
-                            co_date, nights = checkout_map.get(
-                                yoyaku_no, (None, None))
+                            # 予約番号からC/I日・C/O日・泊数を引く（無ければNone）
+                            ci_date, co_date, nights = checkout_map.get(
+                                yoyaku_no, (None, None, None))
 
                             guest_map[room_number] = {
                                 'name': guest_name,
                                 'is_ecoplan': is_ecoplan,
+                                'checkin': ci_date,    # datetime or None
                                 'checkout': co_date,   # datetime or None
                                 'nights': nights,      # int or None
                             }
@@ -1214,6 +1267,78 @@ class HotelCleaningSystem:
             # 何かあっても最低限サイズだけは設定する
             win.geometry(f"{want_w}x{want_h}")
             win.resizable(True, True)
+
+    def _resolve_stay_period(self, guest_info, base_date):
+        """予約CSVから取れた情報と登録起点日（＝清掃日）から
+        (C/I日, 泊数) を決めて返す。
+
+        ・C/I日は予約詳細CSVの実C/I日を優先し、取れなければ登録起点日
+        ・C/O日が取れていればそこまでの実日数、取れなければ「登録起点日+2日」
+          までとする。実C/I日が過去の部屋でもC/Oが必ず登録起点日より後に
+          来るようにするため（登録起点日以前がC/Oになると
+          cleanup_checkout_rooms が次回CSV読込で即削除してしまう）。
+        """
+        if isinstance(guest_info, dict):
+            ci_date = guest_info.get('checkin')
+            co_date = guest_info.get('checkout')
+        else:
+            ci_date = None
+            co_date = None
+
+        checkin = ci_date or base_date
+        if co_date and co_date > checkin:
+            days = (co_date - checkin).days
+        else:
+            days = (base_date - checkin).days + 2
+
+        return checkin, max(days, 1)
+
+    def _build_room_schedule(self, checkin_date, days, middle_status,
+                             cycle_anchor=None, daily_clean=False):
+        """C/I日から days 泊分のスケジュール辞書 {'M/D': ステータス} を作る。
+
+        ・初日 = 'C/I'、最終日（checkin_date + days）= 'C/O'
+        ・3日周期の〇：実C/I日（cycle_anchor。無ければ checkin_date）を起点に
+          NORMAL_CLEAN_CYCLE 日ごと（+3, +6, +9 …）の中日を清掃日とする。
+          - 通常清掃      : 清掃日は〇、それ以外の中日はキーを作らない。
+                            キーが無い日はエコ票で空欄になる。空文字ステータスの
+                            行を作ると cleanup_checkout_rooms の削除対象に
+                            なってしまうため、非清掃日は必ず「キー無し」で表現する
+          - ×／エコドア   : 清掃日は〇、それ以外の中日は middle_status
+          - 清掃不要      : 〇は立てず全中日 middle_status（清掃しない部屋のため）
+        ・daily_clean=True（全日設定で「通常清掃」を明示選択した部屋）は
+          毎日清掃：全中日に〇を立てる（通常清掃とのみ組み合わせて使う）
+
+        cycle_anchor はエコ部屋用。エコ部屋の checkin_date は登録起点日
+        （＝清掃日）のままなので、実C/I日を別途渡して周期を合わせる。
+        """
+        schedule = {}
+        is_normal = (middle_status == self.NORMAL_CLEAN_LABEL)
+        cycles = (middle_status in ('×', 'エコドア')) or is_normal
+        anchor = cycle_anchor or checkin_date
+        current = checkin_date
+
+        for day in range(days + 1):
+            date_str = f"{current.month}/{current.day}"
+            offset = (current - anchor).days
+            is_clean_day = (cycles and offset > 0
+                            and offset % self.NORMAL_CLEAN_CYCLE == 0)
+            if day == 0:
+                schedule[date_str] = "C/I"
+            elif day == days:
+                schedule[date_str] = "C/O"
+            elif is_normal:
+                # 通常清掃：清掃日にだけ〇（毎日清掃なら全中日〇）
+                if daily_clean or is_clean_day:
+                    schedule[date_str] = self.NORMAL_CLEAN_MARK
+            elif is_clean_day:
+                # エコ部屋（×／エコドア）も清掃日は〇
+                schedule[date_str] = self.NORMAL_CLEAN_MARK
+            else:
+                schedule[date_str] = middle_status
+            current += timedelta(days=1)
+
+        return schedule
 
     def show_csv_room_selection_dialog(self, eco_rooms, guest_name_map=None, csv_date=None):
         """CSVから読み込んだ部屋の選択ダイアログを表示"""
@@ -1281,14 +1406,18 @@ class HotelCleaningSystem:
         check_vars = {}
         # ステータス選択用の変数を格納
         status_vars = {}
+        # 強制エコ（チェックを外せない）部屋の集合
+        forced_eco_rooms = set()
 
         def select_all():
             for var in check_vars.values():
                 var.set(True)
 
         def deselect_all():
-            for var in check_vars.values():
-                var.set(False)
+            # 強制エコの部屋は全解除でも外さない
+            for room, var in check_vars.items():
+                if room not in forced_eco_rooms:
+                    var.set(False)
 
         ttk.Button(select_frame, text="全選択", command=select_all, style="Eco.TButton").pack(side="left", padx=3)
         ttk.Button(select_frame, text="全解除", command=deselect_all, style="Eco.TButton").pack(side="left", padx=3)
@@ -1364,8 +1493,8 @@ class HotelCleaningSystem:
         scrollbar.pack(side="right", fill="y")
 
         # 列幅定数（pixel単位）— ヘッダーと各行で共通使用して列を揃える
-        # 順: 選択, 部屋番号, 宿泊者名, C/O, 状態, 中日ステータス, 登録状況
-        COL_MINSIZE = (55, 100, 170, 80, 110, 160, 100)
+        # 順: 選択, 登録状況, 部屋番号, 宿泊者名, C/O, 状態, 全日設定, 編集
+        COL_MINSIZE = (55, 100, 100, 170, 80, 110, 160, 80)
 
         def _configure_row_columns(frame):
             """全ての行フレームで同じ列幅を共有させる"""
@@ -1378,12 +1507,47 @@ class HotelCleaningSystem:
         _configure_row_columns(header_frame)
 
         ttk.Label(header_frame, text="選択", font=header_font, anchor="w").grid(row=0, column=0, padx=5, sticky="w")
-        ttk.Label(header_frame, text="部屋番号", font=header_font, anchor="w").grid(row=0, column=1, padx=5, sticky="w")
-        ttk.Label(header_frame, text="宿泊者名", font=header_font, anchor="w").grid(row=0, column=2, padx=5, sticky="w")
-        ttk.Label(header_frame, text="C/O", font=header_font, anchor="w").grid(row=0, column=3, padx=5, sticky="w")
-        ttk.Label(header_frame, text="状態", font=header_font, anchor="w").grid(row=0, column=4, padx=5, sticky="w")
-        ttk.Label(header_frame, text="中日ステータス", font=header_font, anchor="w").grid(row=0, column=5, padx=5, sticky="w")
-        ttk.Label(header_frame, text="登録状況", font=header_font, anchor="w").grid(row=0, column=6, padx=5, sticky="w")
+        ttk.Label(header_frame, text="登録状況", font=header_font, anchor="w").grid(row=0, column=1, padx=5, sticky="w")
+        ttk.Label(header_frame, text="部屋番号", font=header_font, anchor="w").grid(row=0, column=2, padx=5, sticky="w")
+        ttk.Label(header_frame, text="宿泊者名", font=header_font, anchor="w").grid(row=0, column=3, padx=5, sticky="w")
+        ttk.Label(header_frame, text="C/O", font=header_font, anchor="w").grid(row=0, column=4, padx=5, sticky="w")
+        ttk.Label(header_frame, text="状態", font=header_font, anchor="w").grid(row=0, column=5, padx=5, sticky="w")
+        ttk.Label(header_frame, text="全日設定", font=header_font, anchor="w").grid(row=0, column=6, padx=5, sticky="w")
+        ttk.Label(header_frame, text="編集", font=header_font, anchor="w").grid(row=0, column=7, padx=5, sticky="w")
+
+        def open_room_editor(room_number, guest_info, status_var):
+            """行右端の「編集」ボタン：その部屋の編集画面を開く。
+
+            まだDB登録前の部屋でも開けるよう、行の内容から仮レコードを作って
+            渡す。編集画面で保存するとその時点でDBに登録される
+            （その後この選択ダイアログで登録ボタンを押しても二重登録はしない）。
+            """
+            try:
+                base_date = datetime(int(checkin_vars['year'].get()),
+                                     int(checkin_vars['month'].get()),
+                                     int(checkin_vars['day'].get()))
+            except ValueError:
+                base_date = default_date
+
+            checkin, days = self._resolve_stay_period(guest_info, base_date)
+            middle_status = status_var.get() or '×'
+
+            if isinstance(guest_info, dict):
+                guest_name = guest_info.get('name', '')
+                is_ecoplan_guest = guest_info.get('is_ecoplan', False)
+            else:
+                guest_name = guest_info or ''
+                is_ecoplan_guest = False
+
+            self.open_edit_dialog(room_number, default_record={
+                'room': room_number,
+                'guest': guest_name,
+                'date': checkin,
+                'days': days,
+                'ecodoor': (middle_status == 'エコドア'),
+                'ecoplan': is_ecoplan_guest,
+                'middle_status': middle_status,
+            })
 
         # 部屋ごとのチェックボックス
         for idx, room_info in enumerate(eco_rooms):
@@ -1407,27 +1571,63 @@ class HotelCleaningSystem:
             # 「状態」列の表示：エコプラン該当者は「エコプラン」、非該当者は空欄
             display_status = 'エコプラン' if is_ecoplan_guest else ''
 
+            # 強制エコ判定：エコプラン該当（プラン名に 長期／ウィークリー／
+            # マンスリー／エコ）だけを自動チェックし、チェックを外せなくする。
+            # それ以外のエコ認識はC/I翌日（部屋が初めて一覧に出る日）に
+            # 現場がチェックを付けて行う。チェック＝DBに ×／エコドア／
+            # 清掃不要・アメ不要 として登録され、以降は「登録済み」のまま
+            # 再登録不要（変更は行右端の「編集」から）。
+            is_forced_eco = is_ecoplan_guest
+
             row_frame = ttk.Frame(scrollable_frame)
             row_frame.pack(fill="x", pady=2)
             _configure_row_columns(row_frame)
 
             # 既存チェック
             is_existing = room_number in self.existing_rooms or any(r['room'] == room_number for r in self.records)
-            reg_status_text = "登録済み" if is_existing else "未登録"
+            # 登録済みかつ、ダイアログのチェックイン日（CSVの清掃日）の
+            # 翌日のセルが ×／エコドア／清掃不要 の部屋は赤チェックで
+            # 見分けられるようにする（翌日が〇＝3日周期の清掃日の部屋は黒）
+            is_existing_eco = is_existing and self._is_eco_on_date(
+                room_number, default_date + timedelta(days=1))
+            if is_existing_eco:
+                reg_status_text = "登録済み(エコ)"
+            elif is_existing:
+                reg_status_text = "登録済み"
+            elif is_forced_eco:
+                reg_status_text = "自動エコ"
+            else:
+                reg_status_text = "未登録"
 
-            check_var = tk.BooleanVar(value=False)  # 初期状態は全件解除
+            # 初期状態：強制エコの部屋だけチェック済み、それ以外は解除
+            check_var = tk.BooleanVar(value=(is_forced_eco and not is_existing))
             check_vars[room_number] = check_var
             check_var.trace('w', update_count)
+            if is_forced_eco and not is_existing:
+                forced_eco_rooms.add(room_number)
 
-            cb = ttk.Checkbutton(row_frame, variable=check_var)
-            cb.grid(row=0, column=0, padx=5, sticky="w")
-            if is_existing:
-                cb.config(state='disabled')
+            if is_existing_eco:
+                # macOSではチェックボックスの色変更が効かないため、
+                # 赤い「☑」ラベルで代用する（登録済み行はもともと操作不可）
+                ttk.Label(row_frame, text="☑", foreground="red",
+                          font=("", 16)).grid(row=0, column=0, padx=5, sticky="w")
+            else:
+                cb = ttk.Checkbutton(row_frame, variable=check_var)
+                cb.grid(row=0, column=0, padx=5, sticky="w")
+                # 登録済み＝操作不可、強制エコ＝チェックを外せない
+                if is_existing or is_forced_eco:
+                    cb.config(state='disabled')
 
-            ttk.Label(row_frame, text=room_number, anchor="w", font=row_font).grid(row=0, column=1, padx=5, sticky="w")
-            ttk.Label(row_frame, text=guest_name, anchor="w", font=row_font).grid(row=0, column=2, padx=5, sticky="w")
-            ttk.Label(row_frame, text=checkout_text, anchor="w", font=row_font).grid(row=0, column=3, padx=5, sticky="w")
-            ttk.Label(row_frame, text=display_status, anchor="w", font=row_font).grid(row=0, column=4, padx=5, sticky="w")
+            # 登録状況はチェックボックスの隣（列1）に表示する
+            reg_status_lbl = ttk.Label(
+                row_frame, text=reg_status_text, anchor="w", font=row_font,
+                foreground="red" if is_existing_eco else "")
+            reg_status_lbl.grid(row=0, column=1, padx=5, sticky="w")
+
+            ttk.Label(row_frame, text=room_number, anchor="w", font=row_font).grid(row=0, column=2, padx=5, sticky="w")
+            ttk.Label(row_frame, text=guest_name, anchor="w", font=row_font).grid(row=0, column=3, padx=5, sticky="w")
+            ttk.Label(row_frame, text=checkout_text, anchor="w", font=row_font).grid(row=0, column=4, padx=5, sticky="w")
+            ttk.Label(row_frame, text=display_status, anchor="w", font=row_font).grid(row=0, column=5, padx=5, sticky="w")
 
             # 中日ステータス選択プルダウン（デフォルトは「×」）
             # ※以前コンボボックスでホイールにより値が変わる事故があったため、
@@ -1438,18 +1638,34 @@ class HotelCleaningSystem:
                 row_frame, textvariable=status_var,
                 values=self.MIDDLE_STATUS_CHOICES,
                 state='readonly', width=16, font=row_font)
-            status_combo.grid(row=0, column=5, padx=5, sticky="w")
+            status_combo.grid(row=0, column=6, padx=5, sticky="w")
 
             # コンボボックス上でのホイール操作を無効化（値の誤変更防止）
             status_combo.bind("<MouseWheel>", lambda e: "break")
             status_combo.bind("<Button-4>", lambda e: "break")
             status_combo.bind("<Button-5>", lambda e: "break")
 
+            # プルダウンの選択＝エコ認識としてチェックを連動させる。
+            # ×／エコドア／清掃不要 を選んだらチェックON（エコ登録の意思表示）、
+            # 通常清掃を選んだらチェックOFF（未チェック＝通常清掃として登録）。
+            # 強制エコ（エコプラン）の行はチェック固定のため連動させない
+            def on_status_selected(event, var=check_var, sv=status_var,
+                                   rn=room_number):
+                if rn in forced_eco_rooms:
+                    return
+                var.set(sv.get() != self.NORMAL_CLEAN_LABEL)
+            status_combo.bind('<<ComboboxSelected>>', on_status_selected)
+
             if is_existing:
                 status_combo.config(state='disabled')
 
-            reg_status_lbl = ttk.Label(row_frame, text=reg_status_text, anchor="w", font=row_font)
-            reg_status_lbl.grid(row=0, column=6, padx=5, sticky="w")
+            # 行右端の「編集」ボタン：部屋編集画面を開く。
+            # 強制エコを通常清掃に落としたい場合もここから変更する。
+            ttk.Button(
+                row_frame, text="編集", width=6, style="Eco.TButton",
+                command=lambda rn=room_number, gi=guest_info,
+                               sv=status_var: open_room_editor(rn, gi, sv)
+            ).grid(row=0, column=7, padx=5, sticky="w")
 
             # 2部屋ごとに区切り線を引いて見やすくする
             # （最後の行の後ろには線を入れない）
@@ -1463,14 +1679,11 @@ class HotelCleaningSystem:
 
         # ボタン（枠は上部で最下部固定済み。ここでは中身のボタンだけ追加する）
         def register_rooms():
-            """選択された部屋を2泊宿泊として登録"""
+            """チェックした部屋をエコ清掃として、チェックしなかった部屋を
+            通常清掃（実C/I日起点の3日周期）として登録する"""
             selected_rooms = [room for room, var in check_vars.items() if var.get()]
 
-            if not selected_rooms:
-                messagebox.showwarning("警告", "部屋が選択されていません。")
-                return
-
-            # 選択されたチェックイン日を取得
+            # 選択されたチェックイン日（＝登録起点日・清掃日）を取得
             try:
                 checkin_date = datetime(
                     int(checkin_vars['year'].get()),
@@ -1481,79 +1694,140 @@ class HotelCleaningSystem:
                 messagebox.showerror("エラー", "正しいチェックイン日を入力してください。")
                 return
 
-            registered_count = 0
+            def is_already_registered(room_number):
+                """DB登録済み、またはこの実行中に既に登録した部屋か"""
+                return (room_number in self.existing_rooms
+                        or any(r['room'] == room_number for r in self.records))
 
-            for room_number in selected_rooms:
-                # 既存チェック
-                if room_number in self.existing_rooms or any(r['room'] == room_number for r in self.records):
-                    continue
+            def add_record(room_number, guest_info, middle_status,
+                           room_checkin, days, daily_clean=False):
+                """レコードを組み立てて self.records に追加する。
 
-                # 選択されたステータスを取得（プルダウン: ×／エコドア／清掃不要・アメ不要）
-                middle_status = status_vars[room_number].get() or '×'
-                is_ecodoor = (middle_status == 'エコドア')
-
-                # 宿泊者名・C/O日を取得
-                guest_info = guest_name_map.get(room_number, {})
+                3日周期〇の起点（cycle_anchor）には実C/I日を使う。
+                エコ部屋は room_checkin が登録起点日のままなので、
+                予約CSVから実C/I日が取れていればそちらを優先する。
+                daily_clean=True は毎日清掃（全中日〇）。"""
                 if isinstance(guest_info, dict):
                     guest_name = guest_info.get('name', '')
-                    checkout_date = guest_info.get('checkout')
+                    is_ecoplan_guest = guest_info.get('is_ecoplan', False)
+                    real_checkin = guest_info.get('checkin')
                 else:
                     guest_name = guest_info or ''
-                    checkout_date = None
-
-                # 泊数の決定：
-                #   予約詳細CSVからC/O日が取れていれば
-                #   「登録起点日（=清掃日）〜C/O日」で実際の残り日数を使う。
-                #   取れていない場合は従来どおり2泊固定。
-                if checkout_date and checkout_date > checkin_date:
-                    days = (checkout_date - checkin_date).days
-                else:
-                    days = 2
+                    is_ecoplan_guest = False
+                    real_checkin = None
 
                 record = {
                     'room': room_number,
                     'guest': guest_name,
-                    'date': checkin_date,
+                    'date': room_checkin,
                     'days': days,
-                    'ecodoor': is_ecodoor,
-                    'ecoplan': False,
+                    'ecodoor': (middle_status == 'エコドア'),
+                    'ecoplan': is_ecoplan_guest,
                     'middle_status': middle_status,
-                    'schedule': {},
+                    'schedule': self._build_room_schedule(
+                        room_checkin, days, middle_status,
+                        cycle_anchor=real_checkin,
+                        daily_clean=daily_clean),
                     'is_new': True
                 }
-
-                # スケジュール生成
-                #   day 0        : C/I（登録起点日）
-                #   最終日       : C/O
-                #   中日         : 選択したステータス
-                #                  （×／エコドア／清掃不要・アメ不要）
-                current = checkin_date
-                for day in range(days + 1):
-                    date_str = f"{current.month}/{current.day}"
-                    if day == 0:
-                        status = "C/I"
-                    elif day == days:
-                        status = "C/O"
-                    else:
-                        status = middle_status
-
-                    record['schedule'][date_str] = status
-                    current += timedelta(days=1)
-
                 self.records.append(record)
                 self.existing_rooms.add(room_number)
-                registered_count += 1
+                newly_registered.append(record)
+
+            eco_count = 0
+            normal_count = 0
+            daily_count = 0
+            newly_registered = []   # この操作で登録した部屋（即時DB保存用）
+
+            # --- チェックした部屋：エコ清掃として登録 ---
+            for room_number in selected_rooms:
+                if is_already_registered(room_number):
+                    continue
+
+                # 選択されたステータスを取得
+                # （プルダウン: ×／エコドア／清掃不要・アメ不要／通常清掃）
+                middle_status = status_vars[room_number].get() or '×'
+                guest_info = guest_name_map.get(room_number, {})
+
+                if middle_status == self.NORMAL_CLEAN_LABEL:
+                    # 全日設定で通常清掃を明示選択した部屋は毎日清掃（全中日〇）
+                    room_checkin, days = self._resolve_stay_period(
+                        guest_info, checkin_date)
+                    add_record(room_number, guest_info, middle_status,
+                               room_checkin, days, daily_clean=True)
+                    daily_count += 1
+                    continue
+                else:
+                    # 泊数の決定：
+                    #   予約詳細CSVからC/O日が取れていれば
+                    #   「登録起点日（=清掃日）〜C/O日」で実際の残り日数を使う。
+                    #   取れていない場合は従来どおり2泊固定。
+                    checkout_date = (guest_info.get('checkout')
+                                     if isinstance(guest_info, dict) else None)
+                    room_checkin = checkin_date
+                    if checkout_date and checkout_date > checkin_date:
+                        days = (checkout_date - checkin_date).days
+                    else:
+                        days = 2
+
+                add_record(room_number, guest_info, middle_status,
+                           room_checkin, days)
+                eco_count += 1
+
+            # --- チェックしなかった部屋：通常清掃として自動登録 ---
+            # エコ対象に選ばなかった在室部屋は、実C/I日を起点に
+            # NORMAL_CLEAN_CYCLE 日ごとの通常清掃（〇）としてDBに登録する。
+            # 全日設定で「通常清掃」を明示選択した部屋（選択するとチェックが
+            # 外れる）は毎日清掃として全中日に〇を立てる。
+            # アーニング表ではどちらも従来どおり連泊(stay)扱いのまま
+            # （_load_db_registered_rooms が通常清掃を除外している）。
+            for room_info in eco_rooms:
+                room_number = room_info['room']
+                if room_number in selected_rooms or is_already_registered(room_number):
+                    continue
+
+                guest_info = guest_name_map.get(room_number, {})
+                room_checkin, days = self._resolve_stay_period(
+                    guest_info, checkin_date)
+
+                daily = (status_vars[room_number].get()
+                         == self.NORMAL_CLEAN_LABEL)
+                add_record(room_number, guest_info, self.NORMAL_CLEAN_LABEL,
+                           room_checkin, days, daily_clean=daily)
+                if daily:
+                    daily_count += 1
+                else:
+                    normal_count += 1
+
+            # この時点で即DBへ保存する（「エコ票作成」の押し忘れ対策）。
+            # 失敗した場合は is_new を残し、「エコ票作成」時に再保存を試みる
+            save_error = None
+            if newly_registered:
+                try:
+                    self._save_records_to_db(newly_registered)
+                    for r in newly_registered:
+                        r['is_new'] = False
+                except Exception as e:
+                    save_error = e
 
             cleanup_bindings()
             dialog.destroy()
 
-            if registered_count > 0:
+            if save_error is not None:
+                messagebox.showerror(
+                    "エラー",
+                    f"データベースへの保存に失敗しました: {save_error}\n\n"
+                    "登録内容はメモリ上に残っています。\n"
+                    "「エコ票作成」を押すと再保存を試みます。")
+            elif eco_count > 0 or normal_count > 0 or daily_count > 0:
                 messagebox.showinfo("完了",
-                                    f"{registered_count}件の部屋を登録しました。\n"
-                                    f"登録起点日: {checkin_date.strftime('%Y年%m月%d日')}\n"
-                                    "（C/O日が取れた部屋は実際の泊数、"
-                                    "取れなかった部屋は2泊で登録）\n\n"
-                                    "「エコ票作成」ボタンでExcelを生成してください。")
+                                    f"データベースに登録しました。\n\n"
+                                    f"エコ清掃: {eco_count}件\n"
+                                    f"通常清掃: {normal_count}件"
+                                    f"（実C/I日から{self.NORMAL_CLEAN_CYCLE}日ごとに〇）\n"
+                                    f"毎日清掃: {daily_count}件（全中日に〇）\n"
+                                    f"登録起点日: {checkin_date.strftime('%Y年%m月%d日')}\n\n"
+                                    "エコ票（Excel）が必要な場合は「エコ票作成」を押してください。")
             else:
                 messagebox.showinfo("情報", "新規登録された部屋はありませんでした。")
 
@@ -1563,40 +1837,52 @@ class HotelCleaningSystem:
         ttk.Button(button_frame, text="キャンセル", style="Eco.TButton",
                    command=lambda: (cleanup_bindings(), dialog.destroy())).pack(side="left", padx=5)
 
+    def _save_records_to_db(self, records_to_save):
+        """レコードを rooms / cleaning_schedule テーブルへ保存して commit する。
+
+        「選択した部屋を登録」時と「エコ票作成」時の共通処理。
+        空欄ステータスの日は行を作らない（空文字を保存すると
+        cleanup_checkout_rooms が部屋ごと削除してしまうため）。"""
+        cursor = self.conn.cursor()
+        for record in records_to_save:
+            cursor.execute(
+                '''INSERT OR REPLACE INTO rooms
+                   (room_number, guest_name, check_in_date, cleaning_days,
+                    is_ecodoor, is_ecoplan, middle_status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                (record['room'], record['guest'],
+                 record['date'].strftime('%Y-%m-%d'),
+                 record['days'], record['ecodoor'], record['ecoplan'],
+                 record.get('middle_status',
+                            'エコドア' if record['ecodoor'] else '×')))
+
+            cursor.execute("DELETE FROM cleaning_schedule WHERE room_number = ?", (record['room'],))
+            for date_str, status in record['schedule'].items():
+                if not status:
+                    continue
+                month, day = map(int, date_str.split('/'))
+                year = record['date'].year
+                if month < record['date'].month:
+                    year += 1
+                cleaning_date = datetime(year, month, day)
+                cursor.execute("INSERT INTO cleaning_schedule VALUES (?, ?, ?)",
+                               (record['room'], cleaning_date.strftime('%Y-%m-%d'), status))
+
+        self.conn.commit()
+
     def create_schedule(self):
-        """シンプル化されたエコ票作成"""
+        """エコ票（Excel）を作成する。
+        DB登録は「選択した部屋を登録」時に済んでいるが、
+        保存に失敗したレコード（is_new のまま）があればここで再保存する。"""
         if not self.records:
             messagebox.showerror("エラー", "記録する部屋がありません")
             return
 
         try:
-            # 新しいレコードをデータベース保存
+            # 未保存レコードがあれば保存（通常は登録時に保存済み）
             new_records = [r for r in self.records if r.get('is_new', True)]
-
-            cursor = self.conn.cursor()
-            for record in new_records:
-                cursor.execute(
-                    '''INSERT OR REPLACE INTO rooms
-                       (room_number, guest_name, check_in_date, cleaning_days,
-                        is_ecodoor, is_ecoplan, middle_status)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                    (record['room'], record['guest'],
-                     record['date'].strftime('%Y-%m-%d'),
-                     record['days'], record['ecodoor'], record['ecoplan'],
-                     record.get('middle_status',
-                                'エコドア' if record['ecodoor'] else '×')))
-
-                cursor.execute("DELETE FROM cleaning_schedule WHERE room_number = ?", (record['room'],))
-                for date_str, status in record['schedule'].items():
-                    month, day = map(int, date_str.split('/'))
-                    year = record['date'].year
-                    if month < record['date'].month:
-                        year += 1
-                    cleaning_date = datetime(year, month, day)
-                    cursor.execute("INSERT INTO cleaning_schedule VALUES (?, ?, ?)",
-                                   (record['room'], cleaning_date.strftime('%Y-%m-%d'), status))
-
-            self.conn.commit()
+            if new_records:
+                self._save_records_to_db(new_records)
 
             # Excel生成
             self.generate_excel()
@@ -1612,7 +1898,9 @@ class HotelCleaningSystem:
 
             self.update_room_count_display()
 
-            messagebox.showinfo("完了", f"エコ票を作成しました。\n新規登録: {len(new_records)}件")
+            messagebox.showinfo("完了",
+                                f"エコ票を作成しました。\n"
+                                f"対象部屋: {len(self.records)}件")
 
             # Excel ファイルを開く
             self.open_excel()
@@ -1767,9 +2055,14 @@ class HotelCleaningSystem:
             }
         return None
 
-    def open_edit_dialog(self, room_number):
-        """編集ダイアログを開く"""
-        record = self.find_room_record(room_number)
+    def open_edit_dialog(self, room_number, default_record=None):
+        """編集ダイアログを開く。
+
+        default_record を渡すと、DB未登録の部屋でもその内容を初期値として
+        編集画面を開ける（CSV選択ダイアログの行右端「編集」ボタン用）。
+        保存した時点でDBに登録される。
+        """
+        record = self.find_room_record(room_number) or default_record
         if not record:
             messagebox.showerror("エラー", f"部屋番号 {room_number} の情報が見つかりません")
             return
@@ -1835,7 +2128,7 @@ class HotelCleaningSystem:
         days_label.grid(row=4, column=1, sticky="w", pady=5)
 
         # 中日ステータス（×／エコドア／清掃不要・アメ不要）
-        ttk.Label(frame, text="中日ステータス：").grid(row=5, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="全日設定：").grid(row=5, column=0, sticky="w", pady=5)
         current_middle = record.get('middle_status') or (
             'エコドア' if record['ecodoor'] else '×')
         edit_vars['middle_status'] = tk.StringVar(value=current_middle)
@@ -1964,6 +2257,19 @@ class HotelCleaningSystem:
                 data_frame = ttk.Frame(main_container)
                 data_frame.pack(fill="both", expand=True)
 
+                # 3日周期を反映した既定パターンを生成する。
+                # ・DBに行が無い日（未登録の部屋・C/O延長で増えた日）は
+                #   このパターンから〇／×等を補完する
+                # ・ダイアログで中日ステータスを変更した場合は、保存済みの
+                #   内容よりパターンを優先して全中日を引き直す
+                #   （変更していなければ手動編集済みの保存内容を優先）
+                middle_now = edit_vars['middle_status'].get() or '×'
+                original_middle = record.get('middle_status') or (
+                    'エコドア' if record['ecodoor'] else '×')
+                pattern = self._build_room_schedule(
+                    checkin, (checkout - checkin).days, middle_now)
+                repattern = (middle_now != original_middle)
+
                 # 日付範囲でスケジュール表示
                 current_date = checkin
                 row = 0
@@ -1978,22 +2284,27 @@ class HotelCleaningSystem:
                     date_label = ttk.Label(row_frame, text=date_str, width=8)
                     date_label.grid(row=0, column=0, padx=5, pady=2, sticky="w")
 
-                    # 現在の状態を取得
+                    # 現在の状態を取得（パターンにキーが無い日は空欄＝何も付けない。
+                    # 空欄をDBに保存すると cleanup_checkout_rooms の削除対象に
+                    # なるため、保存時に空欄の日は行を作らない）
                     if current_date == checkin:
                         current_status = "C/I"
                     elif current_date == checkout:
                         current_status = "C/O"
+                    elif repattern:
+                        current_status = pattern.get(date_str, '')
                     else:
-                        current_status = current_schedule.get(date_str, "×")
+                        current_status = current_schedule.get(
+                            date_str, pattern.get(date_str, ''))
 
                     # 現在の状態表示
                     status_label = ttk.Label(row_frame, text=current_status, width=8)
                     status_label.grid(row=0, column=1, padx=5, pady=2, sticky="w")
 
-                    # 変更用コンボボックス
+                    # 変更用コンボボックス（空欄＝その日は何も付けない）
                     schedule_vars[date_str] = tk.StringVar(value=current_status)
                     status_combo = ttk.Combobox(row_frame, textvariable=schedule_vars[date_str], width=16)
-                    status_combo['values'] = ('C/I', 'C/O', '〇', '×', 'エコドア',
+                    status_combo['values'] = ('', 'C/I', 'C/O', '〇', '×', 'エコドア',
                                               self.NO_CLEAN_LABEL)
                     status_combo.grid(row=0, column=2, padx=5, pady=2, sticky="w")
                     # ホイールによる値の誤変更を防止
@@ -2048,6 +2359,10 @@ class HotelCleaningSystem:
         for var in ['checkin_year', 'checkin_month', 'checkin_day', 'checkout_year', 'checkout_month', 'checkout_day']:
             edit_vars[var].trace('w', lambda *args: update_days())
 
+        # 中日ステータス変更時もスケジュール表示を更新
+        # （3日周期の〇パターンを引き直すため）
+        edit_vars['middle_status'].trace('w', lambda *args: update_days())
+
         # 初期表示
         update_schedule_display()
 
@@ -2093,8 +2408,12 @@ class HotelCleaningSystem:
             }
 
             # 個別に編集されたスケジュールを使用
+            # 空欄の日は登録しない（＝その日は何も付けない）。
+            # 空文字で保存すると cleanup_checkout_rooms の削除対象になる
             for date_str, var in schedule_vars.items():
-                updated_record['schedule'][date_str] = var.get()
+                status = var.get()
+                if status:
+                    updated_record['schedule'][date_str] = status
 
             # メモリ上のレコードを更新
             for i, rec in enumerate(self.records):
@@ -2153,6 +2472,13 @@ class HotelCleaningSystem:
 
         return schedule
 
+    def _is_eco_on_date(self, room_number, target_date):
+        """登録済み部屋の target_date のセルがエコ清掃
+        （×/エコドア/清掃不要）になっているかを判定。
+        〇（3日周期の清掃日）やC/I・C/Oは該当しない。"""
+        schedule = self.get_room_schedule(room_number)
+        return schedule.get(f"{target_date.month}/{target_date.day}") in self.ECO_MIDDLE_STATUSES
+
     def _find_earning_template(self):
         """アーニング表テンプレートを自動的に探して、そのパスを返す。
         見つからなければ None。
@@ -2209,7 +2535,11 @@ class HotelCleaningSystem:
           「エコドア」「エコ清掃」「清掃不要」のいずれか、
           含まれていなければ「○（連泊）」。
           middle_status='清掃不要・アメ不要' → 清掃不要、
-          is_ecodoor=True → エコドア、それ以外の登録部屋 → エコ清掃。"""
+          is_ecodoor=True → エコドア、それ以外の登録部屋 → エコ清掃。
+
+        ※ middle_status='通常清掃' の部屋は rooms に登録されていても
+          エコ扱いにはしない（アーニング表では従来どおり連泊(stay)として
+          空欄・緑塗りで出す）。そのため登録済み集合には加えない。"""
         registered = set()
         ecodoor = set()
         noclean = set()
@@ -2220,6 +2550,9 @@ class HotelCleaningSystem:
             try:
                 rn = int(room_number)
             except (TypeError, ValueError):
+                continue
+            # 通常清掃の部屋はエコ判定の対象外（連泊扱いのまま）
+            if middle_status == self.NORMAL_CLEAN_LABEL:
                 continue
             registered.add(rn)
             if middle_status == self.NO_CLEAN_LABEL:
@@ -2552,6 +2885,148 @@ class HotelCleaningSystem:
 
         except Exception as e:
             messagebox.showerror("エラー", f"アーニング表の出力に失敗しました: {e}")
+
+    def show_eco_room_list_dialog(self):
+        """日付を指定して、その日エコ対応（×／エコドア／清掃不要・アメ不要）の
+        部屋をExcelに出力するダイアログを表示する"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("エコ部屋リスト出力")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding="15")
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="リストを出力する日付",
+                  font=("", 13, "bold")).pack(pady=(0, 10))
+
+        today = datetime.now()
+        date_vars = {
+            'year': tk.StringVar(value=str(today.year)),
+            'month': tk.StringVar(value=str(today.month)),
+            'day': tk.StringVar(value=str(today.day)),
+        }
+
+        date_frame = ttk.Frame(frame)
+        date_frame.pack()
+        ttk.Entry(date_frame, textvariable=date_vars['year'], width=6).pack(side="left")
+        ttk.Label(date_frame, text="年").pack(side="left", padx=(0, 5))
+        ttk.Entry(date_frame, textvariable=date_vars['month'], width=4).pack(side="left")
+        ttk.Label(date_frame, text="月").pack(side="left", padx=(0, 5))
+        ttk.Entry(date_frame, textvariable=date_vars['day'], width=4).pack(side="left")
+        ttk.Label(date_frame, text="日").pack(side="left")
+
+        ttk.Label(frame,
+                  text="その日の欄が ×／エコドア／清掃不要・アメ不要 の\n"
+                       "部屋を一覧にします（〇の日の部屋は含みません）",
+                  font=("", 10), justify=tk.CENTER).pack(pady=10)
+
+        def do_export():
+            try:
+                target_date = datetime(
+                    int(date_vars['year'].get()),
+                    int(date_vars['month'].get()),
+                    int(date_vars['day'].get()))
+            except ValueError:
+                messagebox.showerror("エラー", "正しい日付を入力してください。")
+                return
+            dialog.destroy()
+            self.export_eco_room_list(target_date)
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(pady=(5, 0))
+        ttk.Button(btn_frame, text="出力", command=do_export).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="キャンセル",
+                   command=dialog.destroy).pack(side="left", padx=5)
+
+    def export_eco_room_list(self, target_date):
+        """target_date の欄が ×／エコドア／清掃不要・アメ不要 になっている
+        部屋（＝その日エコ対応する部屋）を部屋番号順で
+        「エコ部屋リスト_YYYYMMDD.xlsx」に出力して開く。
+
+        〇（3日周期の清掃日）はエコ・通常共通の清掃作業なので含めない。
+        戻り値は出力ファイルパス（該当なし・失敗時は None）。"""
+        eco_statuses = self.ECO_MIDDLE_STATUSES
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """SELECT s.room_number, s.cleaning_status,
+                      r.guest_name, r.check_in_date, r.cleaning_days
+               FROM cleaning_schedule s
+               LEFT JOIN rooms r ON r.room_number = s.room_number
+               WHERE s.cleaning_date = ?
+                 AND s.cleaning_status IN (?, ?, ?)""",
+            (target_date.strftime('%Y-%m-%d'), *eco_statuses))
+        rows = cursor.fetchall()
+
+        if not rows:
+            messagebox.showinfo(
+                "情報",
+                f"{target_date.strftime('%Y年%m月%d日')} に"
+                "エコ対応の部屋はありません。")
+            return None
+
+        # 部屋番号順（数字でない部屋番号は末尾）
+        def room_key(row):
+            rn = row[0]
+            return (0, int(rn)) if str(rn).isdigit() else (1, str(rn))
+        rows.sort(key=room_key)
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "エコ部屋リスト"
+
+        # タイトル・ヘッダー
+        title_cell = ws.cell(1, 1,
+                             f"エコ部屋リスト {target_date.strftime('%Y/%m/%d')}"
+                             f"（{len(rows)}室）")
+        title_cell.font = Font(bold=True, size=14)
+
+        headers = ("部屋番号", "宿泊者名", "当日状態", "C/I", "C/O")
+        for col, text in enumerate(headers, start=1):
+            cell = ws.cell(3, col, text)
+            cell.font = Font(bold=True)
+            cell.fill = self.EARNING_GREEN_FILL
+
+        # データ行
+        for i, (room, status, guest, ci_str, days) in enumerate(rows):
+            row_no = 4 + i
+            ws.cell(row_no, 1, room)
+            ws.cell(row_no, 2, guest or '')
+            ws.cell(row_no, 3, status)
+            # C/I・C/O は rooms テーブルから復元（無ければ空欄）
+            if ci_str and days is not None:
+                try:
+                    ci = datetime.strptime(ci_str, '%Y-%m-%d')
+                    co = ci + timedelta(days=days)
+                    ws.cell(row_no, 4, f"{ci.month}/{ci.day}")
+                    ws.cell(row_no, 5, f"{co.month}/{co.day}")
+                except ValueError:
+                    pass
+
+        # 列幅
+        for col_letter, width in (('A', 10), ('B', 22), ('C', 16),
+                                  ('D', 8), ('E', 8)):
+            ws.column_dimensions[col_letter].width = width
+
+        output_path = f"エコ部屋リスト_{target_date.strftime('%Y%m%d')}.xlsx"
+        try:
+            wb.save(output_path)
+        except Exception as e:
+            messagebox.showerror(
+                "エラー",
+                f"エコ部屋リストの保存に失敗しました: {e}\n\n"
+                "同名ファイルをExcelで開いたままにしていないか確認してください。")
+            return None
+        finally:
+            wb.close()
+
+        messagebox.showinfo(
+            "出力完了",
+            f"{target_date.strftime('%Y年%m月%d日')} のエコ部屋 {len(rows)}室を\n"
+            f"{output_path} に出力しました。")
+        self.open_file(output_path)
+        return output_path
 
     def open_file(self, path):
         """指定したファイルを既定のアプリで開く"""
