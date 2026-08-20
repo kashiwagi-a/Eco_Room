@@ -1408,6 +1408,8 @@ class HotelCleaningSystem:
         status_vars = {}
         # 強制エコ（チェックを外せない）部屋の集合
         forced_eco_rooms = set()
+        # 行ごとのウィジェット参照（編集保存後の行表示更新用）
+        row_ctrls = {}
 
         def select_all():
             for var in check_vars.values():
@@ -1515,12 +1517,70 @@ class HotelCleaningSystem:
         ttk.Label(header_frame, text="全日設定", font=header_font, anchor="w").grid(row=0, column=6, padx=5, sticky="w")
         ttk.Label(header_frame, text="編集", font=header_font, anchor="w").grid(row=0, column=7, padx=5, sticky="w")
 
+        def refresh_row(room_number):
+            """編集画面での保存後に、その部屋の行表示（チェック・登録状況・
+            全日設定プルダウン）を最新の登録状態に合わせて描き直す。
+            赤チェック（登録済みかつ清掃日翌日が×／エコドア／清掃不要）の
+            付け外しもここで反映される。"""
+            ctrl = row_ctrls.get(room_number)
+            if not ctrl or not ctrl['row_frame'].winfo_exists():
+                return
+
+            is_existing = (room_number in self.existing_rooms
+                           or any(r['room'] == room_number
+                                  for r in self.records))
+            try:
+                base_date = datetime(int(checkin_vars['year'].get()),
+                                     int(checkin_vars['month'].get()),
+                                     int(checkin_vars['day'].get()))
+            except ValueError:
+                base_date = default_date
+            is_existing_eco = is_existing and self._is_eco_on_date(
+                room_number, base_date + timedelta(days=1))
+
+            if is_existing_eco:
+                reg_status_text = "登録済み(エコ)"
+            elif is_existing:
+                reg_status_text = "登録済み"
+            elif room_number in forced_eco_rooms:
+                reg_status_text = "自動エコ"
+            else:
+                reg_status_text = "未登録"
+            ctrl['reg_status_lbl'].config(
+                text=reg_status_text,
+                foreground="red" if is_existing_eco else "")
+
+            # 列0のチェック表示を作り直す（赤☑ラベル⇔チェックボックス）
+            check_var = ctrl['check_var']
+            if is_existing:
+                check_var.set(False)
+            ctrl['check_widget'].destroy()
+            if is_existing_eco:
+                widget = ttk.Label(ctrl['row_frame'], text="☑",
+                                   foreground="red", font=("", 16))
+            else:
+                widget = ttk.Checkbutton(ctrl['row_frame'],
+                                         variable=check_var)
+                if is_existing or room_number in forced_eco_rooms:
+                    widget.config(state='disabled')
+            widget.grid(row=0, column=0, padx=5, sticky="w")
+            ctrl['check_widget'] = widget
+
+            # 登録済みになったらプルダウンを保存値に合わせてロックする
+            record = next((r for r in self.records
+                           if r['room'] == room_number), None)
+            if is_existing and record:
+                ctrl['status_var'].set(record.get('middle_status') or '×')
+            ctrl['status_combo'].config(
+                state='disabled' if is_existing else 'readonly')
+
         def open_room_editor(room_number, guest_info, status_var):
             """行右端の「編集」ボタン：その部屋の編集画面を開く。
 
             まだDB登録前の部屋でも開けるよう、行の内容から仮レコードを作って
             渡す。編集画面で保存するとその時点でDBに登録される
             （その後この選択ダイアログで登録ボタンを押しても二重登録はしない）。
+            保存後は refresh_row でこの一覧の該当行を描き直す。
             """
             try:
                 base_date = datetime(int(checkin_vars['year'].get()),
@@ -1547,7 +1607,7 @@ class HotelCleaningSystem:
                 'ecodoor': (middle_status == 'エコドア'),
                 'ecoplan': is_ecoplan_guest,
                 'middle_status': middle_status,
-            })
+            }, on_saved=lambda: refresh_row(room_number))
 
         # 部屋ごとのチェックボックス
         for idx, room_info in enumerate(eco_rooms):
@@ -1609,14 +1669,15 @@ class HotelCleaningSystem:
             if is_existing_eco:
                 # macOSではチェックボックスの色変更が効かないため、
                 # 赤い「☑」ラベルで代用する（登録済み行はもともと操作不可）
-                ttk.Label(row_frame, text="☑", foreground="red",
-                          font=("", 16)).grid(row=0, column=0, padx=5, sticky="w")
+                check_widget = ttk.Label(row_frame, text="☑", foreground="red",
+                                         font=("", 16))
+                check_widget.grid(row=0, column=0, padx=5, sticky="w")
             else:
-                cb = ttk.Checkbutton(row_frame, variable=check_var)
-                cb.grid(row=0, column=0, padx=5, sticky="w")
+                check_widget = ttk.Checkbutton(row_frame, variable=check_var)
+                check_widget.grid(row=0, column=0, padx=5, sticky="w")
                 # 登録済み＝操作不可、強制エコ＝チェックを外せない
                 if is_existing or is_forced_eco:
-                    cb.config(state='disabled')
+                    check_widget.config(state='disabled')
 
             # 登録状況はチェックボックスの隣（列1）に表示する
             reg_status_lbl = ttk.Label(
@@ -1658,6 +1719,16 @@ class HotelCleaningSystem:
 
             if is_existing:
                 status_combo.config(state='disabled')
+
+            # 編集保存後の行表示更新（refresh_row）用に参照を保持する
+            row_ctrls[room_number] = {
+                'row_frame': row_frame,
+                'check_widget': check_widget,
+                'check_var': check_var,
+                'reg_status_lbl': reg_status_lbl,
+                'status_var': status_var,
+                'status_combo': status_combo,
+            }
 
             # 行右端の「編集」ボタン：部屋編集画面を開く。
             # 強制エコを通常清掃に落としたい場合もここから変更する。
@@ -2055,12 +2126,15 @@ class HotelCleaningSystem:
             }
         return None
 
-    def open_edit_dialog(self, room_number, default_record=None):
+    def open_edit_dialog(self, room_number, default_record=None,
+                         on_saved=None):
         """編集ダイアログを開く。
 
         default_record を渡すと、DB未登録の部屋でもその内容を初期値として
         編集画面を開ける（CSV選択ダイアログの行右端「編集」ボタン用）。
         保存した時点でDBに登録される。
+        on_saved を渡すと、保存成功後（DBコミット後）に呼び出す。
+        呼び出し元の一覧表示を保存内容に合わせて更新する用途。
         """
         record = self.find_room_record(room_number) or default_record
         if not record:
@@ -2448,6 +2522,8 @@ class HotelCleaningSystem:
             self.conn.commit()
 
             dialog.destroy()
+            if on_saved:
+                on_saved()
             messagebox.showinfo("成功", f"部屋 {room_number} の情報を更新しました")
 
         ttk.Button(button_frame, text="保存", command=save_changes).pack(side="left", padx=5)
