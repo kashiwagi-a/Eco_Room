@@ -1450,8 +1450,18 @@ class HotelCleaningSystem:
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
+        # bind_all はアプリ全体にかかるため、このダイアログ以外
+        # （部屋編集ダイアログ等の別ウィンドウ）上のイベントには反応させない
+        def _is_own_event(event):
+            try:
+                return event.widget.winfo_toplevel() is dialog
+            except (AttributeError, tk.TclError):
+                return False
+
         # マウスホイールスクロール（ダイアログのどこにカーソルがあっても効く）
         def on_mousewheel(event):
+            if not _is_own_event(event):
+                return
             # canvasがまだ存在するか確認
             if not canvas.winfo_exists():
                 return
@@ -1463,12 +1473,16 @@ class HotelCleaningSystem:
 
         # Linux (X11) ではホイールが Button-4 / Button-5 として届く
         def on_button4(event):
+            if not _is_own_event(event):
+                return
             if not canvas.winfo_exists():
                 return
             canvas.yview_scroll(-1, "units")
             return "break"
 
         def on_button5(event):
+            if not _is_own_event(event):
+                return
             if not canvas.winfo_exists():
                 return
             canvas.yview_scroll(1, "units")
@@ -1908,6 +1922,13 @@ class HotelCleaningSystem:
         ttk.Button(button_frame, text="キャンセル", style="Eco.TButton",
                    command=lambda: (cleanup_bindings(), dialog.destroy())).pack(side="left", padx=5)
 
+        # 一覧の必要幅を実測してウィンドウ幅を再調整（右端「編集」列の見切れ防止）
+        dialog.update_idletasks()
+        need_w = (scrollable_frame.winfo_reqwidth()
+                  + scrollbar.winfo_reqwidth() + 40)  # 外枠padding15×2 + 余裕
+        self._fit_toplevel_to_screen(dialog, max(900, need_w), 860,
+                                     min_w=560, min_h=420)
+
     def _save_records_to_db(self, records_to_save):
         """レコードを rooms / cleaning_schedule テーブルへ保存して commit する。
 
@@ -2236,19 +2257,33 @@ class HotelCleaningSystem:
             canvas.configure(scrollregion=canvas.bbox("all"))
 
         def on_mousewheel(event):
+            if not canvas.winfo_exists():
+                return
             if platform.system() == "Darwin":
                 canvas.yview_scroll(int(-1 * event.delta), "units")
             else:  # Windows/Linux
                 canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            # "break" で伝播を止め、背後のダイアログの bind_all まで届かせない
+            return "break"
+
+        def on_button4(event):
+            if not canvas.winfo_exists():
+                return
+            canvas.yview_scroll(-1, "units")
+            return "break"
+
+        def on_button5(event):
+            if not canvas.winfo_exists():
+                return
+            canvas.yview_scroll(1, "units")
+            return "break"
 
         # マウスホイールバインド
         def bind_mousewheel(widget):
-            if platform.system() == "Darwin":  # mac
-                widget.bind("<MouseWheel>", on_mousewheel)
-            else:  # Windows/Linux
-                widget.bind("<MouseWheel>", on_mousewheel)
-                widget.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
-                widget.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+            widget.bind("<MouseWheel>", on_mousewheel)
+            if platform.system() != "Darwin":  # Linux (X11)
+                widget.bind("<Button-4>", on_button4)
+                widget.bind("<Button-5>", on_button5)
 
         bind_mousewheel(canvas)
         bind_mousewheel(scrollable_frame)
