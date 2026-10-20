@@ -2422,8 +2422,12 @@ class HotelCleaningSystem:
         """部屋の編集"""
         self.show_room_edit_dialog()
 
-    def show_room_edit_dialog(self):
-        """部屋選択ダイアログを表示（編集用）"""
+    def show_room_edit_dialog(self, select_room=None):
+        """部屋選択ダイアログを表示（編集用）。
+
+        編集画面を閉じる（保存・キャンセル）とこの一覧に戻り、続けて別の部屋を
+        編集できる。select_room を渡すとその部屋を選択・表示した状態で開く。
+        """
         all_rooms = list(self.existing_rooms) + [r['room'] for r in self.records]
         all_rooms = sorted(set(all_rooms), key=lambda x: int(x) if x.isdigit() else float('inf'))
 
@@ -2450,6 +2454,13 @@ class HotelCleaningSystem:
             listbox.insert(tk.END, display_text)
         listbox.pack(fill="both", expand=True, padx=10, pady=5)
 
+        # 直前に編集した部屋を選択状態にして見える位置までスクロール
+        if select_room in all_rooms:
+            idx = all_rooms.index(select_room)
+            listbox.selection_set(idx)
+            listbox.activate(idx)
+            listbox.see(idx)
+
         button_frame = ttk.Frame(dialog)
         button_frame.pack(pady=10)
 
@@ -2458,12 +2469,21 @@ class HotelCleaningSystem:
             if selection:
                 selected_room = all_rooms[selection[0]]
                 dialog.destroy()
-                self.open_edit_dialog(selected_room)
+                # 編集画面を閉じたらこの一覧に戻る（続けて別の部屋を編集できるように）
+                self.open_edit_dialog(
+                    selected_room,
+                    on_closed=lambda: self.show_room_edit_dialog(
+                        select_room=selected_room))
             else:
                 messagebox.showwarning("警告", "部屋を選択してください。")
 
         ttk.Button(button_frame, text="編集", command=on_edit).pack(side="left", padx=5)
         ttk.Button(button_frame, text="キャンセル", command=dialog.destroy).pack(side="left", padx=5)
+
+        # ダブルクリック・Enterキーでも編集画面を開く
+        listbox.bind("<Double-Button-1>", lambda e: on_edit())
+        listbox.bind("<Return>", lambda e: on_edit())
+        listbox.focus_set()
 
     def find_room_record(self, room_number):
         """部屋番号からレコードを検索"""
@@ -2494,7 +2514,7 @@ class HotelCleaningSystem:
         return None
 
     def open_edit_dialog(self, room_number, default_record=None,
-                         on_saved=None):
+                         on_saved=None, on_closed=None):
         """編集ダイアログを開く。
 
         default_record を渡すと、DB未登録の部屋でもその内容を初期値として
@@ -2502,6 +2522,8 @@ class HotelCleaningSystem:
         保存した時点でDBに登録される。
         on_saved を渡すと、保存成功後（DBコミット後）に呼び出す。
         呼び出し元の一覧表示を保存内容に合わせて更新する用途。
+        on_closed を渡すと、ダイアログを閉じた後（保存なら完了メッセージの後、
+        またはキャンセル・×ボタン）に呼び出す。部屋編集の一覧へ戻る用途。
         """
         record = self.find_room_record(room_number) or default_record
         if not record:
@@ -3028,9 +3050,18 @@ class HotelCleaningSystem:
             if on_saved:
                 on_saved()
             messagebox.showinfo("成功", f"部屋 {room_number} の情報を更新しました")
+            if on_closed:
+                on_closed()
+
+        def cancel_changes():
+            dialog.destroy()
+            if on_closed:
+                on_closed()
+
+        dialog.protocol("WM_DELETE_WINDOW", cancel_changes)
 
         ttk.Button(button_frame, text="保存", command=save_changes).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="キャンセル", command=dialog.destroy).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="キャンセル", command=cancel_changes).pack(side="left", padx=5)
 
     def get_room_schedule(self, room_number):
         """部屋のスケジュールを取得"""
