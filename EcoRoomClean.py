@@ -981,6 +981,7 @@ class HotelCleaningSystem:
         try:
             # 部屋状態CSVを読み込み
             eco_rooms = []
+            room_status_map = {}  # 部屋番号 -> 状態コード（全部屋。DB登録との不一致確認用）
             csv_date = None  # CSV 1行目1列目から取得するチェックイン日
             with open(room_status_path, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
@@ -995,6 +996,7 @@ class HotelCleaningSystem:
                     if len(row) >= 7:
                         room_number = row[1]  # 2列目：部屋番号
                         room_status = row[6]  # 7列目：部屋の状態
+                        room_status_map[room_number] = room_status
 
                         # 状態が'3'（在室・連泊中＝エコ清掃対象）の部屋のみ抽出
                         # ※ '1'=未チェックイン、'0'=空室、'2'=チェックアウト は対象外
@@ -1048,11 +1050,355 @@ class HotelCleaningSystem:
 
                     messagebox.showinfo("CSV読込時データ整理", message)
 
+            # 部屋移動・アーリーC/Oなどで、DBに登録が残っているのに
+            # CSVでは在室(3)でなくなった部屋を確認し、部屋移動／削除／そのままを選んでもらう
+            # （C/O日基準の自動削除では消えないため）
+            mismatched = self._find_status_mismatch_rooms(room_status_map, guest_name_map)
+            if mismatched:
+                self.show_status_mismatch_dialog(mismatched, room_status_map,
+                                                 guest_name_map, csv_date)
+
             # 部屋選択ダイアログを表示
             self.show_csv_room_selection_dialog(eco_rooms, guest_name_map, csv_date)
 
         except Exception as e:
             messagebox.showerror("エラー", f"CSVファイルの読み込みに失敗しました: {e}")
+
+    # 部屋状態CSVの状態コード表示名（不一致確認ダイアログ用）
+    CSV_STATUS_LABELS = {'0': '空室', '1': '未C/I', '2': 'C/O', '3': '在室'}
+
+    # 不一致確認ダイアログの処理選択肢
+    MISMATCH_ACTION_MOVE = '部屋移動'
+    MISMATCH_ACTION_DELETE = '削除'
+    MISMATCH_ACTION_KEEP = 'そのまま'
+
+    # 不一致確認の実行結果を追記するログファイル（実行ディレクトリ直下）
+    STATUS_CHECK_LOG_FILE = '部屋状態確認ログ.txt'
+
+    @staticmethod
+    def _normalize_guest_name(name):
+        """宿泊者名の比較用正規化（NFKC＋空白除去）。空なら空文字"""
+        if not name:
+            return ''
+        import unicodedata
+        name = unicodedata.normalize('NFKC', name)
+        return ''.join(name.split())
+
+    def _find_status_mismatch_rooms(self, room_status_map, guest_name_map):
+        """DBに登録が残っているのに、部屋状態CSVでは在室(3)でない部屋を探す。
+
+        状態 0(空室)／1(未C/I)／2(C/O) の登録部屋が対象。CSVに載っていない
+        部屋は判断できないので対象外。C/O日基準の自動削除の後に呼ぶ前提
+        （残っているのは登録C/O日より前に部屋が空いたもの＝部屋移動や
+        アーリーC/O）。
+
+        予約CSVがあれば、登録者名と同じ宿泊者がいる在室部屋を移動先候補として
+        自動で探す。その部屋がすでにDB登録済みなら候補ではなく
+        registered_matches（同名の宿泊者がすでに別部屋で登録済み）に入れる。
+        """
+        # 在室部屋の宿泊者名（予約CSV）を正規化して部屋ごとに持っておく
+        in_house_names = {}
+        for room, status in room_status_map.items():
+            if status != '3':
+                continue
+            info = guest_name_map.get(room, {})
+            name = info.get('name', '') if isinstance(info, dict) else (info or '')
+            in_house_names[room] = self._normalize_guest_name(name)
+
+        mismatched = []
+        for record in sorted(self.records, key=lambda r: r['room']):
+            room = record['room']
+            status = room_status_map.get(room)
+            if status is None or status == '3':
+                continue
+
+            guest_key = self._normalize_guest_name(record.get('guest'))
+            candidates = []
+            registered_matches = []
+            if guest_key:
+                for other_room, other_key in sorted(in_house_names.items()):
+                    if other_room == room or other_key != guest_key:
+                        continue
+                    if other_room in self.existing_rooms:
+                        registered_matches.append(other_room)
+                    else:
+                        candidates.append(other_room)
+
+            mismatched.append({
+                'room': room,
+                'guest': record.get('guest') or '',
+                'middle_status': record.get('middle_status') or '',
+                'csv_status': status,
+                'candidates': candidates,
+                'registered_matches': registered_matches,
+            })
+        return mismatched
+
+    def _move_room_in_db(self, cursor, old_room, new_room):
+        """部屋移動：登録内容・清掃予定をそのまま新しい部屋番号へ付け替える
+        （commitは呼び出し側）"""
+        cursor.execute("UPDATE rooms SET room_number = ? WHERE room_number = ?",
+                       (new_room, old_room))
+        cursor.execute("UPDATE cleaning_schedule SET room_number = ? WHERE room_number = ?",
+                       (new_room, old_room))
+
+    def _delete_room_in_db(self, cursor, room):
+        """部屋の登録と清掃予定を削除する（commitは呼び出し側）"""
+        cursor.execute("DELETE FROM rooms WHERE room_number = ?", (room,))
+        cursor.execute("DELETE FROM cleaning_schedule WHERE room_number = ?", (room,))
+
+    def _write_status_check_log(self, lines, csv_date):
+        """不一致確認の実行結果をログファイルへ追記する。失敗しても処理は続ける"""
+        try:
+            with open(self.STATUS_CHECK_LOG_FILE, 'a', encoding='utf-8') as f:
+                stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                csv_text = csv_date.strftime('%Y-%m-%d') if csv_date else '不明'
+                f.write(f"[{stamp}] 部屋状態CSV日付: {csv_text}\n")
+                for line in lines:
+                    f.write(f"  {line}\n")
+                f.write("\n")
+        except Exception as e:
+            print(f"部屋状態確認ログの書き込みに失敗: {e}")
+
+    def show_status_mismatch_dialog(self, mismatched, room_status_map,
+                                    guest_name_map, csv_date=None):
+        """DB登録があるのにCSVで在室でない部屋の確認ダイアログ。
+
+        部屋ごとに「部屋移動（移動先の部屋番号へ登録を付け替え）」
+        「削除」「そのまま」を選んで実行する。閉じるまで呼び出し元を待たせる。
+
+        初期選択：
+          ・予約CSVで同名の宿泊者の在室部屋（未登録）が見つかった → 部屋移動（移動先自動入力）
+          ・それ以外 → 削除
+        移動先がすでにDB登録済みの部屋には移動できない（二重登録防止）。
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title("部屋状態の確認")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        self._fit_toplevel_to_screen(dialog, 1050, 560, min_w=640, min_h=360)
+
+        row_font = ("", 12)
+        header_font = ("", 12, "bold")
+
+        frame = ttk.Frame(dialog, padding="15")
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="登録済みの部屋の状態確認", font=("", 16, "bold")).pack(pady=(0, 8))
+        ttk.Label(frame,
+                  text=f"DBに登録があるのに、部屋状態CSVで在室になっていない部屋が"
+                       f"{len(mismatched)}件あります（部屋移動・アーリーC/Oなど）。\n"
+                       "部屋ごとに処理を選んで「実行」を押してください。"
+                       "「部屋移動」は登録内容と清掃予定をそのまま移動先へ付け替えます。",
+                  font=("", 11), justify=tk.CENTER).pack(pady=(0, 10))
+
+        # 移動先の選択肢：CSVで在室かつ未登録の部屋（手入力も可）
+        free_in_house = sorted(room for room, status in room_status_map.items()
+                               if status == '3' and room not in self.existing_rooms)
+
+        def guest_name_of(room):
+            info = guest_name_map.get(room, {})
+            return info.get('name', '') if isinstance(info, dict) else (info or '')
+
+        # --- 一覧（件数が多い場合に備えてスクロール可能に） ---
+        list_outer = ttk.Frame(frame)
+        list_outer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(list_outer, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(list_outer, orient="vertical", command=canvas.yview)
+        table = ttk.Frame(canvas)
+        table.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=table, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        headers = ("部屋番号", "登録者名", "登録区分", "CSV状態", "処理", "移動先", "備考")
+        for col, text in enumerate(headers):
+            ttk.Label(table, text=text, font=header_font).grid(
+                row=0, column=col, padx=6, pady=(0, 4), sticky="w")
+
+        row_ctrls = []
+        for i, item in enumerate(mismatched, start=1):
+            candidates = item['candidates']
+            registered = item['registered_matches']
+
+            notes = []
+            if candidates:
+                notes.append(f"同名の宿泊者を {'、'.join(candidates)} で検出")
+            if registered:
+                notes.append(f"同名の宿泊者が {'、'.join(registered)} に登録済み")
+            if not candidates and not registered:
+                notes.append("移動先の候補なし")
+
+            default_action = (self.MISMATCH_ACTION_MOVE if candidates
+                              else self.MISMATCH_ACTION_DELETE)
+            action_var = tk.StringVar(value=default_action)
+            dest_var = tk.StringVar(value=candidates[0] if candidates else '')
+
+            ttk.Label(table, text=item['room'], font=row_font).grid(row=i, column=0, padx=6, pady=3, sticky="w")
+            ttk.Label(table, text=item['guest'], font=row_font).grid(row=i, column=1, padx=6, pady=3, sticky="w")
+            ttk.Label(table, text=item['middle_status'], font=row_font).grid(row=i, column=2, padx=6, pady=3, sticky="w")
+            ttk.Label(table, text=self.CSV_STATUS_LABELS.get(item['csv_status'], item['csv_status']),
+                      font=row_font).grid(row=i, column=3, padx=6, pady=3, sticky="w")
+
+            action_combo = ttk.Combobox(
+                table, textvariable=action_var, state='readonly', width=9, font=row_font,
+                values=(self.MISMATCH_ACTION_MOVE, self.MISMATCH_ACTION_DELETE,
+                        self.MISMATCH_ACTION_KEEP))
+            action_combo.grid(row=i, column=4, padx=6, pady=3, sticky="w")
+
+            # 候補（同名の宿泊者）を先頭に、残りの在室・未登録部屋を続ける
+            dest_values = candidates + [r for r in free_in_house if r not in candidates]
+            dest_combo = ttk.Combobox(table, textvariable=dest_var, width=8,
+                                      font=row_font, values=dest_values)
+            dest_combo.grid(row=i, column=5, padx=6, pady=3, sticky="w")
+
+            ttk.Label(table, text=" ／ ".join(notes), font=("", 11),
+                      foreground="red" if registered else "").grid(
+                row=i, column=6, padx=6, pady=3, sticky="w")
+
+            # ホイールで値が変わる事故防止（部屋選択ダイアログと同じ対策）
+            for combo in (action_combo, dest_combo):
+                combo.bind("<MouseWheel>", lambda e: "break")
+                combo.bind("<Button-4>", lambda e: "break")
+                combo.bind("<Button-5>", lambda e: "break")
+
+            # 部屋移動以外では移動先を入力不可にする
+            def sync_dest_state(*_, av=action_var, dc=dest_combo):
+                dc.config(state='normal' if av.get() == self.MISMATCH_ACTION_MOVE
+                          else 'disabled')
+            action_var.trace('w', sync_dest_state)
+            sync_dest_state()
+
+            row_ctrls.append((item, action_var, dest_var))
+
+        def close():
+            dialog.grab_release()
+            dialog.destroy()
+
+        def execute():
+            moves = []    # (item, 移動先)
+            deletes = []  # item
+            keeps = []    # item
+            errors = []
+            warnings = []
+            used_dests = {}
+
+            for item, action_var, dest_var in row_ctrls:
+                room = item['room']
+                action = action_var.get()
+                if action == self.MISMATCH_ACTION_KEEP:
+                    keeps.append(item)
+                    continue
+                if action == self.MISMATCH_ACTION_DELETE:
+                    deletes.append(item)
+                    continue
+
+                dest = dest_var.get().strip()
+                if not dest:
+                    errors.append(f"{room}：移動先の部屋番号を入力してください。")
+                    continue
+                # 「305」のように0を省いて入力されても登録済みの表記（0305）に合わせる
+                if dest not in room_status_map and dest.isdigit():
+                    for known in room_status_map:
+                        if known.isdigit() and int(known) == int(dest):
+                            dest = known
+                            break
+                if dest == room:
+                    errors.append(f"{room}：移動先が同じ部屋番号です。")
+                    continue
+                if dest in self.existing_rooms:
+                    reg = next((r for r in self.records if r['room'] == dest), None)
+                    reg_name = f"（{reg['guest']}）" if reg and reg.get('guest') else ''
+                    errors.append(f"{room}：移動先 {dest} はすでにデータベースに登録済みです{reg_name}。"
+                                  "先にそちらを確認してください。")
+                    continue
+                if dest in used_dests:
+                    errors.append(f"{room}：移動先 {dest} は {used_dests[dest]} の移動先にも指定されています。")
+                    continue
+                used_dests[dest] = room
+
+                dest_status = room_status_map.get(dest)
+                if dest_status is None:
+                    warnings.append(f"{room}→{dest}：移動先が部屋状態CSVにありません。")
+                elif dest_status != '3':
+                    warnings.append(f"{room}→{dest}：移動先がCSVで在室ではありません"
+                                    f"（{self.CSV_STATUS_LABELS.get(dest_status, dest_status)}）。")
+                dest_name = guest_name_of(dest)
+                if (dest_name and item['guest']
+                        and self._normalize_guest_name(dest_name)
+                        != self._normalize_guest_name(item['guest'])):
+                    warnings.append(f"{room}→{dest}：登録者名（{item['guest']}）と"
+                                    f"移動先の宿泊者名（{dest_name}）が違います。")
+                moves.append((item, dest))
+
+            if errors:
+                messagebox.showerror("入力エラー", "\n".join(errors), parent=dialog)
+                return
+
+            if not moves and not deletes:
+                close()
+                return
+
+            # 確認ログ（実行内容の一覧）を表示して最終確認
+            log_lines = []
+            for item, dest in moves:
+                log_lines.append(f"部屋移動: {item['room']} → {dest}（{item['guest']}／{item['middle_status']}）")
+            for item in deletes:
+                log_lines.append(f"削除: {item['room']}（{item['guest']}／{item['middle_status']}／"
+                                 f"CSV状態: {self.CSV_STATUS_LABELS.get(item['csv_status'], item['csv_status'])}）")
+            for item in keeps:
+                log_lines.append(f"そのまま: {item['room']}（{item['guest']}）")
+
+            msg = "以下の内容で実行します。\n\n" + "\n".join(log_lines)
+            if warnings:
+                msg += "\n\n【注意】\n" + "\n".join(warnings)
+            msg += "\n\nよろしいですか？"
+            if not messagebox.askyesno("実行内容の確認", msg, parent=dialog):
+                return
+
+            # 削除は元に戻せないため、実行前にDBをバックアップしておく
+            # （バックアップ管理から復元できる）
+            self.conn.commit()
+            backup_name = self.create_database_backup_silent()
+            log_lines.append(f"実行前バックアップ: {backup_name}")
+
+            cursor = self.conn.cursor()
+            try:
+                for item, dest in moves:
+                    self._move_room_in_db(cursor, item['room'], dest)
+                for item in deletes:
+                    self._delete_room_in_db(cursor, item['room'])
+                self.conn.commit()
+            except Exception as e:
+                self.conn.rollback()
+                messagebox.showerror("エラー", f"データベースの更新に失敗しました: {e}\n"
+                                               "変更は取り消されました。", parent=dialog)
+                return
+
+            self._write_status_check_log(log_lines + [f"注意: {w}" for w in warnings], csv_date)
+
+            # 付け替え・削除をメモリ上の一覧にも反映
+            self.records.clear()
+            self.existing_rooms.clear()
+            self.load_data()
+            self.update_room_count_display()
+
+            close()
+            messagebox.showinfo("完了",
+                                f"部屋移動: {len(moves)}件\n削除: {len(deletes)}件\n"
+                                f"そのまま: {len(keeps)}件\n\n"
+                                f"実行内容は「{self.STATUS_CHECK_LOG_FILE}」に記録しました。\n"
+                                f"実行前バックアップ: {backup_name}")
+
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(pady=(10, 0))
+        ttk.Button(button_frame, text="実行", command=execute).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="すべてそのまま（閉じる）",
+                   command=close).pack(side="left", padx=5)
+        dialog.protocol("WM_DELETE_WINDOW", close)
+
+        dialog.wait_window()
 
     # エコプラン判定キーワード（NFKCで正規化してから部分一致で判定）
     ECO_PLAN_KEYWORDS = ['長期', 'ウィークリー', 'マンスリー', 'エコ']
