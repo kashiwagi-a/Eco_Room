@@ -2510,7 +2510,7 @@ class HotelCleaningSystem:
 
         dialog = tk.Toplevel(self.root)
         dialog.title(f"部屋 {room_number} の編集")
-        dialog.geometry("500x700")
+        dialog.geometry("560x740")
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -2588,10 +2588,39 @@ class HotelCleaningSystem:
         ttk.Checkbutton(frame, text="エコプラン", variable=edit_vars['ecoplan']).grid(row=6, column=1, sticky="w",
                                                                                       pady=5)
 
+        # エコ再開日（この日から3日周期を引き直す）
+        # 指定した日がエコ（中日ステータス）の1日目になり、〇はその2日後・5日後 …
+        # に立つ。前日を「直前の清掃日」とみなすので×は2日連続に収まる。
+        # 指定日より前の日と C/I・C/O 行は一切触らない。
+        ttk.Label(frame, text="エコ再開日：").grid(row=7, column=0, sticky="w", pady=5)
+        reassign_frame = ttk.Frame(frame)
+        reassign_frame.grid(row=7, column=1, sticky="w", pady=5)
+
+        # 初期値：今日が中日ならその日（＝昨日まで清掃済みで今日からエコ、の想定）、
+        # 範囲外ならC/I日の翌日（＝標準の周期と同じ結果になる日）
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        if record['date'] < today < checkout_date:
+            default_anchor = today
+        else:
+            default_anchor = record['date'] + timedelta(days=1)
+
+        edit_vars['reassign_year'] = tk.StringVar(value=str(default_anchor.year))
+        edit_vars['reassign_month'] = tk.StringVar(value=str(default_anchor.month))
+        edit_vars['reassign_day'] = tk.StringVar(value=str(default_anchor.day))
+
+        ttk.Entry(reassign_frame, textvariable=edit_vars['reassign_year'], width=6).pack(side="left")
+        ttk.Label(reassign_frame, text="年").pack(side="left")
+        ttk.Entry(reassign_frame, textvariable=edit_vars['reassign_month'], width=4).pack(side="left")
+        ttk.Label(reassign_frame, text="月").pack(side="left")
+        ttk.Entry(reassign_frame, textvariable=edit_vars['reassign_day'], width=4).pack(side="left")
+        ttk.Label(reassign_frame, text="日").pack(side="left")
+        # 実行／解除ボタンは do_reassign・clear_reassign の定義後に
+        # この reassign_frame へ追加する
+
         # 個別スケジュール編集
-        ttk.Label(frame, text="スケジュール編集：").grid(row=7, column=0, sticky="nw", pady=5)
+        ttk.Label(frame, text="スケジュール編集：").grid(row=8, column=0, sticky="nw", pady=5)
         schedule_frame = ttk.Frame(frame)
-        schedule_frame.grid(row=7, column=1, sticky="ew", pady=5)
+        schedule_frame.grid(row=8, column=1, sticky="ew", pady=5)
 
         # スケジュール編集用のScrollable Frame
         canvas = tk.Canvas(schedule_frame, width=400, height=250, bg="white")
@@ -2654,6 +2683,39 @@ class HotelCleaningSystem:
 
         # スケジュール項目の辞書
         schedule_vars = {}
+
+        # 振り直しのエコ再開日。日付や全日設定を変えて
+        # スケジュールを描き直すときも同じ日で引き直せるよう覚えておく
+        reassign_state = {'anchor': None}
+
+        # {'M/D': datetime}。'M/D' キーは年を持たないため、
+        # エコ再開日との前後比較用に実日付を別途保持する
+        schedule_dates = {}
+
+        def apply_reassign(anchor, checkin, checkout, middle_now):
+            """anchor（エコ再開日）以降の中日を3日周期で引き直す。
+
+            anchor はエコ（中日ステータス）を数え直す最初の日。その前日を
+            「直前の清掃日」とみなして cycle_anchor に渡すので、〇は
+            anchor+2, anchor+5, anchor+8 … に立ち、×は2日連続に収まる
+            （anchor をそのまま cycle_anchor にすると anchor 自身も×になり
+            ×が3日連続してしまう）。
+            anchor より前の日と C/I・C/O 行は触らない。
+            「現在」列のラベルは元の値を示すためあえて更新しない
+            （手動でコンボボックスを変えたときの挙動と揃える）。
+            """
+            pattern = self._build_room_schedule(
+                checkin, (checkout - checkin).days, middle_now,
+                cycle_anchor=anchor - timedelta(days=1))
+
+            for date_str, var in schedule_vars.items():
+                target = schedule_dates.get(date_str)
+                if target is None or target < anchor:
+                    continue  # エコ再開日より前は据え置き
+                if target == checkin or target == checkout:
+                    continue  # C/I・C/O は固定
+                # パターンにキーが無い日は空欄（＝その日は行を作らない）
+                var.set(pattern.get(date_str, ''))
 
         # スケジュール表示を更新する関数
         def update_schedule_display():
@@ -2758,6 +2820,7 @@ class HotelCleaningSystem:
 
                     # 変更用コンボボックス（空欄＝その日は何も付けない）
                     schedule_vars[date_str] = tk.StringVar(value=current_status)
+                    schedule_dates[date_str] = current_date
                     status_combo = ttk.Combobox(row_frame, textvariable=schedule_vars[date_str], width=16)
                     status_combo['values'] = ('', 'C/I', 'C/O', '〇', '×', 'エコドア',
                                               self.NO_CLEAN_LABEL)
@@ -2801,6 +2864,12 @@ class HotelCleaningSystem:
                     info_label.pack(pady=5)
                     bind_mousewheel(info_label)
 
+                # エコ再開日が設定済みなら、描き直した内容に再適用する
+                # （C/O日を延ばした場合も同じ起点で周期が続くようにするため）
+                anchor = reassign_state['anchor']
+                if anchor and checkin < anchor < checkout:
+                    apply_reassign(anchor, checkin, checkout, middle_now)
+
             except ValueError:
                 days_label.config(text="日付エラー")
                 error_label = tk.Label(scrollable_frame, text="正しい日付を入力してください", fg="red")
@@ -2818,12 +2887,65 @@ class HotelCleaningSystem:
         # （3日周期の〇パターンを引き直すため）
         edit_vars['middle_status'].trace('w', lambda *args: update_days())
 
+        def do_reassign():
+            """「この日から振り直し」ボタン：エコ再開日以降の中日を引き直す"""
+            try:
+                checkin = datetime(
+                    int(edit_vars['checkin_year'].get()),
+                    int(edit_vars['checkin_month'].get()),
+                    int(edit_vars['checkin_day'].get())
+                )
+                checkout = datetime(
+                    int(edit_vars['checkout_year'].get()),
+                    int(edit_vars['checkout_month'].get()),
+                    int(edit_vars['checkout_day'].get())
+                )
+            except ValueError:
+                messagebox.showerror(
+                    "エラー", "正しいチェックイン日／チェックアウト日を入力してください",
+                    parent=dialog)
+                return
+
+            try:
+                anchor = datetime(
+                    int(edit_vars['reassign_year'].get()),
+                    int(edit_vars['reassign_month'].get()),
+                    int(edit_vars['reassign_day'].get())
+                )
+            except ValueError:
+                messagebox.showerror(
+                    "エラー", "正しいエコ再開日を入力してください", parent=dialog)
+                return
+
+            # C/I日・C/O日は固定なので、エコ再開日に指定できるのは中日だけ
+            if not (checkin < anchor < checkout):
+                messagebox.showerror(
+                    "エラー",
+                    "エコ再開日はチェックイン日の翌日〜チェックアウト日の"
+                    "前日で指定してください",
+                    parent=dialog)
+                return
+
+            reassign_state['anchor'] = anchor
+            apply_reassign(anchor, checkin, checkout,
+                           edit_vars['middle_status'].get() or '×')
+
+        def clear_reassign():
+            """「解除」ボタン：振り直しを取り消して既定の表示に戻す"""
+            reassign_state['anchor'] = None
+            update_schedule_display()
+
+        ttk.Button(reassign_frame, text="この日から振り直し",
+                   command=do_reassign).pack(side="left", padx=(8, 2))
+        ttk.Button(reassign_frame, text="解除",
+                   command=clear_reassign).pack(side="left")
+
         # 初期表示
         update_schedule_display()
 
         # ボタン
         button_frame = ttk.Frame(frame)
-        button_frame.grid(row=8, column=0, columnspan=2, pady=20)
+        button_frame.grid(row=9, column=0, columnspan=2, pady=20)
 
         def save_changes():
             try:
