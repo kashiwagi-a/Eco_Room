@@ -28,11 +28,24 @@ jobs:
       run: |
         pyinstaller --onefile --windowed --name "EcoRoomClean" "EcoRoomClean.py"
 
-    - name: Upload EXE
+    - name: EXEをzipに圧縮
+      shell: pwsh
+      run: |
+        Compress-Archive -Path dist/EcoRoomClean.exe -DestinationPath dist/EcoRoomClean-Windows.zip -Force
+
+    - name: Upload ZIP
       uses: actions/upload-artifact@v4
       with:
         name: EcoRoomClean-Windows
-        path: dist/EcoRoomClean.exe
+        path: dist/EcoRoomClean-Windows.zip
+
+    - name: 既存Releaseから古いEXEを削除
+      shell: pwsh
+      continue-on-error: true
+      run: |
+        gh release delete-asset latest EcoRoomClean.exe -y
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: ログイン不要で配布できる最新版Releaseを更新
       uses: softprops/action-gh-release@v2
@@ -40,6 +53,6 @@ jobs:
         tag_name: latest
         name: 最新ビルド
         make_latest: true
-        files: dist/EcoRoomClean.exe
+        files: dist/EcoRoomClean-Windows.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
