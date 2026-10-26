@@ -2939,11 +2939,13 @@ class HotelCleaningSystem:
                     "エラー", "正しいエコ再開日を入力してください", parent=dialog)
                 return
 
-            # C/I日・C/O日は固定なので、エコ再開日に指定できるのは中日だけ
-            if not (checkin < anchor < checkout):
+            # C/O日以降は振り直す中日が無いので不可。C/I日は指定可
+            # （C/I日をエコ1日目とみなし、〇がC/I日の2日後から立つ。
+            #   C/I行自体は apply_reassign で固定のまま）
+            if not (checkin <= anchor < checkout):
                 messagebox.showerror(
                     "エラー",
-                    "エコ再開日はチェックイン日の翌日〜チェックアウト日の"
+                    "エコ再開日はチェックイン日〜チェックアウト日の"
                     "前日で指定してください",
                     parent=dialog)
                 return
