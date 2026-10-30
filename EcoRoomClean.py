@@ -978,6 +978,13 @@ class HotelCleaningSystem:
         # 後でエコ票作成→アーニング表出力に再利用するため、部屋状態CSVのパスを保持
         self.last_room_status_csv = room_status_path
 
+        # House_Clean（清掃割り当て）でCSVを選び直さずに済むよう、CSVの中身をDBに保存する
+        self.save_shared_csvs({
+            'room_status': room_status_path,
+            'yoyaku': yoyaku_path,
+            'yoyaku_co': yoyaku_co_path,
+        })
+
         try:
             # 部屋状態CSVを読み込み
             eco_rooms = []
@@ -1475,6 +1482,72 @@ class HotelCleaningSystem:
             return True
 
         return False
+
+    # House_Clean と共有するCSVの種別ごとの文字コード候補（読込処理と同じ順）
+    SHARED_CSV_ENCODINGS = {
+        'room_status': ('utf-8',),
+        'yoyaku': ('cp932', 'shift_jis', 'utf-8'),
+        'yoyaku_co': ('cp932', 'shift_jis', 'utf-8'),
+    }
+
+    def save_shared_csvs(self, paths):
+        """読み込んだCSVの中身を shared_csv テーブルに保存する（House_Clean連携用）。
+
+        paths: {'room_status' / 'yoyaku' / 'yoyaku_co': ファイルパス or None}
+        テーブルは常に「最後に読み込んだCSV一式」だけを持つ（今回選ばれなかった
+        種別は削除する）。中身は文字コードを変換した文字列で保存するため、
+        House_Clean 側は元ファイルの場所や文字コードを気にせず読める。
+        保存に失敗してもエコ票の処理は続けられるよう、警告のみ出す。
+        """
+        rows = []
+        for kind, path in paths.items():
+            if not path:
+                continue
+            content = None
+            for encoding in self.SHARED_CSV_ENCODINGS[kind]:
+                try:
+                    with open(path, 'r', encoding=encoding, newline='') as f:
+                        content = f.read()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if content is None:
+                continue
+
+            # 1行目1列目の YYYYMMDD（部屋状態CSVの清掃日）を日付として持っておく
+            csv_date = None
+            first_row = next(csv.reader(content.splitlines()), [])
+            if first_row and first_row[0].isdigit() and len(first_row[0]) == 8:
+                try:
+                    csv_date = datetime.strptime(first_row[0], '%Y%m%d').strftime('%Y-%m-%d')
+                except ValueError:
+                    csv_date = None
+
+            rows.append((kind, os.path.basename(path), csv_date,
+                         datetime.now().strftime('%Y-%m-%d %H:%M:%S'), content))
+
+        try:
+            cursor = self.conn.cursor()
+            # バックアップから復元した古いDBにはテーブルが無いので、ここでも作成する
+            cursor.execute('''CREATE TABLE IF NOT EXISTS shared_csv
+                              (
+                                  kind TEXT PRIMARY KEY,
+                                  file_name TEXT,
+                                  csv_date TEXT,
+                                  imported_at TEXT,
+                                  content TEXT
+                              )''')
+            cursor.execute("DELETE FROM shared_csv")
+            cursor.executemany(
+                "INSERT INTO shared_csv (kind, file_name, csv_date, imported_at, content) "
+                "VALUES (?, ?, ?, ?, ?)", rows)
+            self.conn.commit()
+        except Exception as e:
+            messagebox.showwarning(
+                "警告",
+                f"CSVの内容をデータベースに保存できませんでした: {e}\n"
+                "清掃割り当て側では部屋状態CSVを手動で選択してください。"
+            )
 
     def load_checkout_map(self, file_path):
         """予約詳細CSV(202605291形式)から

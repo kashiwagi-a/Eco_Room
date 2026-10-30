@@ -72,6 +72,11 @@ python main.py
 4. 部屋一覧から登録対象を選択し、中日ステータス（×/エコドア）を設定
 5. チェックイン日を指定して「選択した部屋を登録」
 
+### 清掃割り当て（House_Clean）との連携
+
+CSV読込を行うと、読み込んだ3つのCSV（部屋状態CSV・予約CSV・予約詳細CSV）の中身が `hotel_cleaning.db` の `shared_csv` テーブルに保存されます。
+House_Clean は起動時に同じフォルダの `hotel_cleaning.db` を自動選択し、保存された部屋状態CSVをそのまま使うため、House_Clean 側でCSVを選び直す必要はありません。
+
 ### エコ票の作成
 
 メイン画面の「エコ票作成」ボタンで `hotel_cleaning_now.xlsx` が生成され、自動で開きます。
