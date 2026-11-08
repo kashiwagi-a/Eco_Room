@@ -35,6 +35,9 @@ class HotelCleaningSystem:
         # が横並びで見切れない幅を確保する
         self.root.geometry("560x200")
 
+        # 大きい文字用のスタイル（部屋編集画面で使用）
+        self._setup_big_font_styles()
+
         self.init_database()
 
         # 起動時にチェックアウト削除を実行（バックアップは手動）
@@ -699,6 +702,40 @@ class HotelCleaningSystem:
         ttk.Button(button_frame, text="削除実行", command=do_cleanup).pack(side="left", padx=5)
         ttk.Button(button_frame, text="キャンセル", command=dialog.destroy).pack(side="left", padx=5)
 
+    # 部屋編集画面の文字サイズ（pt）
+    BIG_FONT_SIZE = 15
+
+    def _setup_big_font_styles(self):
+        """大きい文字用の ttk スタイルとプルダウン一覧の文字サイズを設定する"""
+        size = self.BIG_FONT_SIZE
+        style = ttk.Style(self.root)
+        style.configure("Big.TButton", font=("", size), padding=(12, 6))
+        style.configure("Big.TCheckbutton", font=("", size))
+        # Combobox のドロップダウン一覧（tk.Listbox）の文字も大きくする
+        self.root.option_add("*TCombobox*Listbox.font", ("", size))
+
+    def _enlarge_widget_fonts(self, widget, size=None):
+        """widget 配下の文字を一括で大きくする（太字指定は維持する）。
+
+        個別に font 指定していないウィジェットも含めて揃えるために使う。
+        ttk の Button / Checkbutton は font オプションを持たないため
+        Big.* スタイルに切り替える。
+        """
+        size = size or self.BIG_FONT_SIZE
+        for child in widget.winfo_children():
+            cls = child.winfo_class()
+            try:
+                if cls in ("TLabel", "TEntry", "TCombobox", "Label", "Entry", "Listbox"):
+                    bold = "bold" in str(child.cget("font"))
+                    child.configure(font=("", size, "bold") if bold else ("", size))
+                elif cls == "TButton":
+                    child.configure(style="Big.TButton")
+                elif cls == "TCheckbutton":
+                    child.configure(style="Big.TCheckbutton")
+            except tk.TclError:
+                pass
+            self._enlarge_widget_fonts(child, size)
+
     def setup_gui(self):
         frame = ttk.Frame(self.root, padding="10")
         frame.pack(fill="both", expand=True)
@@ -791,6 +828,24 @@ class HotelCleaningSystem:
                               cleaning_date
                               DATE,
                               cleaning_status
+                              TEXT
+                          )''')
+
+        # CSV共有: 清掃管理システム（Java）側が同じCSVを選び直さずに使えるよう、
+        # 直前に読み込んだCSVの中身を種別ごとに保存する
+        cursor.execute('''CREATE TABLE IF NOT EXISTS shared_csv
+                          (
+                              kind
+                              TEXT
+                              PRIMARY
+                              KEY,
+                              file_name
+                              TEXT,
+                              csv_date
+                              TEXT,
+                              imported_at
+                              TEXT,
+                              content
                               TEXT
                           )''')
 
@@ -894,6 +949,44 @@ class HotelCleaningSystem:
                 continue
 
         return 'unknown'
+
+    def read_csv_text(self, file_path):
+        """CSVをテキストとして読む（utf-8 → cp932 → shift_jis の順に試す）"""
+        for encoding in ('utf-8', 'cp932', 'shift_jis'):
+            try:
+                with open(file_path, 'r', encoding=encoding, newline='') as f:
+                    return f.read()
+            except UnicodeDecodeError:
+                continue
+        return None
+
+    def save_shared_csvs(self, paths, csv_date):
+        """読み込んだCSVの中身を shared_csv テーブルへ保存する。
+
+        前回分は消してから保存し、今回選ばなかった種別（予約CSVなど）が古いまま残らないようにする。
+        保存に失敗してもエコ側のCSV読込は続行する。
+        """
+        imported_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        date_text = csv_date.strftime('%Y-%m-%d') if csv_date else None
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("DELETE FROM shared_csv")
+            for kind, path in paths.items():
+                if not path:
+                    continue
+                content = self.read_csv_text(path)
+                if content is None:
+                    continue
+                # csv_date は部屋状態CSVの日付（清掃日）。他の種別は日付を持たない
+                cursor.execute(
+                    "INSERT INTO shared_csv (kind, file_name, csv_date, imported_at, content) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (kind, os.path.basename(path),
+                     date_text if kind == 'room_status' else None,
+                     imported_at, content))
+            self.conn.commit()
+        except Exception as e:
+            print(f"共有CSVの保存に失敗しました: {e}")
 
     def import_csv(self):
         """CSVファイルを読み込んでエコ清掃対象部屋を選択するダイアログを表示。
@@ -1005,6 +1098,13 @@ class HotelCleaningSystem:
                                 'room': room_number,
                                 'status': room_status
                             })
+
+            # 清掃管理システム側へCSVを共有（エコ対象が無い日でも部屋状態は使えるため先に保存）
+            self.save_shared_csvs({
+                'room_status': room_status_path,
+                'yoyaku': yoyaku_path,
+                'yoyaku_co': yoyaku_co_path,
+            }, csv_date)
 
             if not eco_rooms:
                 messagebox.showinfo("情報", "エコ清掃対象の部屋が見つかりませんでした。")
@@ -1405,13 +1505,21 @@ class HotelCleaningSystem:
 
     # 中日ステータスの選択肢（プルダウン用）
     NO_CLEAN_LABEL = '清掃不要・アメ不要'
-    # 通常清掃（エコ対象に選ばなかった在室部屋）を表す中日ステータス。
-    # ・チェックなしで自動登録された部屋 → 実C/I日起点の3日周期で〇
-    # ・全日設定でこの値を明示選択した部屋 → 毎日清掃（全中日に〇）
+    # エコ対象に選ばなかった在室部屋を表す中日ステータス（2種類）。
+    # ・通常清掃      : チェックなしで自動登録された部屋 → 実C/I日起点の3日周期で〇、
+    #                   それ以外の中日は空欄
+    # ・毎日デュベ清掃: エコ区分／全日設定でこの値を明示選択した部屋 → 全中日に〇
     # どちらもアーニング表では従来どおり「連泊(stay)」扱いにする
     # （_load_db_registered_rooms で登録済み集合から除外している）。
+    # ※以前は毎日清掃の部屋も '通常清掃' で保存していたため、既存DBには
+    #   全中日〇の '通常清掃' 部屋が残っている場合がある。
     NORMAL_CLEAN_LABEL = '通常清掃'
-    MIDDLE_STATUS_CHOICES = ('×', 'エコドア', NO_CLEAN_LABEL, NORMAL_CLEAN_LABEL)
+    DAILY_CLEAN_LABEL = '毎日デュベ清掃'
+    NON_ECO_MIDDLE_STATUSES = (NORMAL_CLEAN_LABEL, DAILY_CLEAN_LABEL)
+    # CSV読込のエコ区分プルダウン（通常清掃はチェックを外すことで選ぶ）
+    MIDDLE_STATUS_CHOICES = ('×', 'エコドア', NO_CLEAN_LABEL, DAILY_CLEAN_LABEL)
+    # 部屋編集の全日設定プルダウン（3日周期の通常清掃も選べる）
+    EDIT_MIDDLE_STATUS_CHOICES = MIDDLE_STATUS_CHOICES + (NORMAL_CLEAN_LABEL,)
 
     # エコ清掃扱いの中日ステータス（判定用）
     ECO_MIDDLE_STATUSES = ('×', 'エコドア', NO_CLEAN_LABEL)
@@ -1640,7 +1748,8 @@ class HotelCleaningSystem:
         return checkin, max(days, 1)
 
     def _build_room_schedule(self, checkin_date, days, middle_status,
-                             cycle_anchor=None, daily_clean=False):
+                             cycle_anchor=None, daily_clean=False,
+                             fill_all=False):
         """C/I日から days 泊分のスケジュール辞書 {'M/D': ステータス} を作る。
 
         ・初日 = 'C/I'、最終日（checkin_date + days）= 'C/O'
@@ -1652,14 +1761,20 @@ class HotelCleaningSystem:
                             なってしまうため、非清掃日は必ず「キー無し」で表現する
           - ×／エコドア   : 清掃日は〇、それ以外の中日は middle_status
           - 清掃不要      : 〇は立てず全中日 middle_status（清掃しない部屋のため）
-        ・daily_clean=True（全日設定で「通常清掃」を明示選択した部屋）は
-          毎日清掃：全中日に〇を立てる（通常清掃とのみ組み合わせて使う）
+        ・毎日デュベ清掃（または 通常清掃 + daily_clean=True）は
+          毎日清掃：全中日に〇を立てる
+        ・fill_all=True（部屋編集の「全日設定」）は3日周期を使わず、
+          選んだ値を全中日にそのまま入れる。ただし通常清掃は
+          3日周期（〇と空欄）のまま、毎日デュベ清掃は全中日〇
 
-        cycle_anchor はエコ部屋用。エコ部屋の checkin_date は登録起点日
-        （＝清掃日）のままなので、実C/I日を別途渡して周期を合わせる。
+        cycle_anchor は周期の起点を checkin_date 以外にしたいとき用
+        （部屋編集のエコ再開日など）。CSV読込の登録では checkin_date に
+        実C/I日を渡すので、C/I日の翌日・翌々日は必ずエコになる。
         """
         schedule = {}
-        is_normal = (middle_status == self.NORMAL_CLEAN_LABEL)
+        if middle_status == self.DAILY_CLEAN_LABEL:
+            daily_clean = True
+        is_normal = (middle_status in self.NON_ECO_MIDDLE_STATUSES)
         cycles = (middle_status in ('×', 'エコドア')) or is_normal
         anchor = cycle_anchor or checkin_date
         current = checkin_date
@@ -1673,6 +1788,9 @@ class HotelCleaningSystem:
                 schedule[date_str] = "C/I"
             elif day == days:
                 schedule[date_str] = "C/O"
+            elif fill_all and not is_normal:
+                # 全日設定：選んだ値を全中日にそのまま入れる
+                schedule[date_str] = middle_status
             elif is_normal:
                 # 通常清掃：清掃日にだけ〇（毎日清掃なら全中日〇）
                 if daily_clean or is_clean_day:
@@ -1696,11 +1814,11 @@ class HotelCleaningSystem:
         dialog.transient(self.root)
         dialog.grab_set()
         # 画面に収まるサイズに自動調整（小さい画面での見切れ防止）＋リサイズ可能に
-        self._fit_toplevel_to_screen(dialog, 900, 860, min_w=560, min_h=420)
+        self._fit_toplevel_to_screen(dialog, 960, 1000, min_w=560, min_h=420)
 
         # このダイアログ内の文字を大きくする
-        row_font = ("", 13)            # 部屋一覧の各行テキスト用
-        header_font = ("", 12, "bold") # 一覧ヘッダー用
+        row_font = ("", 15)            # 部屋一覧の各行テキスト用
+        header_font = ("", 14, "bold") # 一覧ヘッダー用
         dlg_style = ttk.Style(dialog)
         dlg_style.configure("Eco.TCheckbutton", font=row_font)
         dlg_style.configure("Eco.TButton", font=row_font)
@@ -1709,7 +1827,7 @@ class HotelCleaningSystem:
         frame.pack(fill="both", expand=True)
 
         # タイトル
-        title_label = ttk.Label(frame, text="エコ清掃対象部屋の選択", font=("", 18, "bold"))
+        title_label = ttk.Label(frame, text="エコ清掃対象部屋の選択", font=("", 20, "bold"))
         title_label.pack(pady=(0, 10))
 
         # 説明
@@ -1717,7 +1835,7 @@ class HotelCleaningSystem:
                                text=f"CSVから{len(eco_rooms)}件のエコ清掃対象部屋が見つかりました。\n"
                                     "チェックを入れた部屋を登録します"
                                     "（C/O日あり→実泊数／なし→2泊）。",
-                               font=("", 13), justify=tk.CENTER)
+                               font=("", 15), justify=tk.CENTER)
         info_label.pack(pady=(0, 10))
 
         # チェックイン日選択
@@ -1735,14 +1853,14 @@ class HotelCleaningSystem:
         date_input_frame = ttk.Frame(checkin_frame)
         date_input_frame.pack()
 
-        ttk.Entry(date_input_frame, textvariable=checkin_vars['year'], width=6).pack(side="left")
-        ttk.Label(date_input_frame, text="年").pack(side="left", padx=(0, 5))
+        ttk.Entry(date_input_frame, textvariable=checkin_vars['year'], width=6, font=row_font).pack(side="left")
+        ttk.Label(date_input_frame, text="年", font=row_font).pack(side="left", padx=(0, 5))
 
-        ttk.Entry(date_input_frame, textvariable=checkin_vars['month'], width=4).pack(side="left")
-        ttk.Label(date_input_frame, text="月").pack(side="left", padx=(0, 5))
+        ttk.Entry(date_input_frame, textvariable=checkin_vars['month'], width=4, font=row_font).pack(side="left")
+        ttk.Label(date_input_frame, text="月", font=row_font).pack(side="left", padx=(0, 5))
 
-        ttk.Entry(date_input_frame, textvariable=checkin_vars['day'], width=4).pack(side="left")
-        ttk.Label(date_input_frame, text="日").pack(side="left")
+        ttk.Entry(date_input_frame, textvariable=checkin_vars['day'], width=4, font=row_font).pack(side="left")
+        ttk.Label(date_input_frame, text="日", font=row_font).pack(side="left")
 
         # 全選択/全解除ボタン
         select_frame = ttk.Frame(frame)
@@ -1788,7 +1906,7 @@ class HotelCleaningSystem:
         list_frame = ttk.LabelFrame(frame, text="部屋一覧", padding="10")
         list_frame.pack(fill="both", expand=True, pady=(0, 15))
 
-        canvas = tk.Canvas(list_frame, width=800, height=440, bg="white")
+        canvas = tk.Canvas(list_frame, width=860, height=600, bg="white")
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
 
@@ -1855,7 +1973,7 @@ class HotelCleaningSystem:
         scrollbar.pack(side="right", fill="y")
 
         # 列幅定数（pixel単位）— ヘッダーと各行で共通使用して列を揃える
-        # 順: 選択, 登録状況, 部屋番号, 宿泊者名, C/O, 状態, 全日設定, 編集
+        # 順: 選択, 登録状況, 部屋番号, 宿泊者名, C/O, 状態, エコ区分, 編集
         COL_MINSIZE = (55, 100, 100, 170, 80, 110, 160, 80)
 
         def _configure_row_columns(frame):
@@ -1874,12 +1992,70 @@ class HotelCleaningSystem:
         ttk.Label(header_frame, text="宿泊者名", font=header_font, anchor="w").grid(row=0, column=3, padx=5, sticky="w")
         ttk.Label(header_frame, text="C/O", font=header_font, anchor="w").grid(row=0, column=4, padx=5, sticky="w")
         ttk.Label(header_frame, text="状態", font=header_font, anchor="w").grid(row=0, column=5, padx=5, sticky="w")
-        ttk.Label(header_frame, text="全日設定", font=header_font, anchor="w").grid(row=0, column=6, padx=5, sticky="w")
+        ttk.Label(header_frame, text="エコ区分", font=header_font, anchor="w").grid(row=0, column=6, padx=5, sticky="w")
         ttk.Label(header_frame, text="編集", font=header_font, anchor="w").grid(row=0, column=7, padx=5, sticky="w")
+
+        def get_base_date():
+            """画面上部のチェックイン日（登録起点日）。入力不正なら初期値"""
+            try:
+                return datetime(int(checkin_vars['year'].get()),
+                                int(checkin_vars['month'].get()),
+                                int(checkin_vars['day'].get()))
+            except ValueError:
+                return default_date
+
+        def is_auto_eco_next_day_eco(room_number):
+            """自動エコ（未登録のエコプラン）の部屋を今の内容で登録した場合に、
+            登録起点日の翌日が ×／エコドア／清掃不要 になるかを予測する。
+            register_rooms のエコ登録と同じ条件（実C/I日起点）でスケジュールを
+            組み立てる。"""
+            middle_status = status_vars[room_number].get() or '×'
+            if middle_status not in self.ECO_MIDDLE_STATUSES:
+                return False  # 通常清掃を選んでいればエコにならない
+            base_date = get_base_date()
+            guest_info = guest_name_map.get(room_number, {})
+            room_checkin, days = self._resolve_stay_period(
+                guest_info, base_date)
+            schedule = self._build_room_schedule(
+                room_checkin, days, middle_status)
+            next_day = base_date + timedelta(days=1)
+            return (schedule.get(f"{next_day.month}/{next_day.day}")
+                    in self.ECO_MIDDLE_STATUSES)
+
+        def update_auto_eco_color(room_number):
+            """「自動エコ」行の登録状況を、翌日がエコになるなら赤字にする"""
+            ctrl = row_ctrls.get(room_number)
+            if not ctrl or not ctrl['reg_status_lbl'].winfo_exists():
+                return
+            if ctrl['reg_status_lbl'].cget('text') != "自動エコ":
+                return
+            red = is_auto_eco_next_day_eco(room_number)
+            ctrl['reg_status_lbl'].config(foreground="red" if red else "")
+
+            # チェック欄も赤い「☑」ラベル⇔チェックボックスを切り替える
+            # （macOSではチェックボックスの色変更が効かないためラベルで代用。
+            #   check_var は True のままなので登録対象からは外れない）
+            is_red_mark = ctrl['check_widget'].winfo_class() == "TLabel"
+            if red == is_red_mark:
+                return
+            ctrl['check_widget'].destroy()
+            if red:
+                widget = ttk.Label(ctrl['row_frame'], text="☑",
+                                   foreground="red", font=("", 18))
+            else:
+                widget = ttk.Checkbutton(ctrl['row_frame'],
+                                         variable=ctrl['check_var'],
+                                         state='disabled')
+            widget.grid(row=0, column=0, padx=5, sticky="w")
+            ctrl['check_widget'] = widget
+
+        def update_all_auto_eco_colors(*_):
+            for rn in list(row_ctrls):
+                update_auto_eco_color(rn)
 
         def refresh_row(room_number):
             """編集画面での保存後に、その部屋の行表示（チェック・登録状況・
-            全日設定プルダウン）を最新の登録状態に合わせて描き直す。
+            エコ区分プルダウン）を最新の登録状態に合わせて描き直す。
             赤チェック（登録済みかつ清掃日翌日が×／エコドア／清掃不要）の
             付け外しもここで反映される。"""
             ctrl = row_ctrls.get(room_number)
@@ -1909,6 +2085,7 @@ class HotelCleaningSystem:
             ctrl['reg_status_lbl'].config(
                 text=reg_status_text,
                 foreground="red" if is_existing_eco else "")
+            update_auto_eco_color(room_number)
 
             # 列0のチェック表示を作り直す（赤☑ラベル⇔チェックボックス）
             check_var = ctrl['check_var']
@@ -1917,7 +2094,7 @@ class HotelCleaningSystem:
             ctrl['check_widget'].destroy()
             if is_existing_eco:
                 widget = ttk.Label(ctrl['row_frame'], text="☑",
-                                   foreground="red", font=("", 16))
+                                   foreground="red", font=("", 18))
             else:
                 widget = ttk.Checkbutton(ctrl['row_frame'],
                                          variable=check_var)
@@ -1949,6 +2126,7 @@ class HotelCleaningSystem:
             except ValueError:
                 base_date = default_date
 
+            # 「登録」ボタンと同じく、部屋ごとの実C/I日／C/O日を使う
             checkin, days = self._resolve_stay_period(guest_info, base_date)
             middle_status = status_var.get() or '×'
 
@@ -2000,7 +2178,7 @@ class HotelCleaningSystem:
             is_forced_eco = is_ecoplan_guest
 
             row_frame = ttk.Frame(scrollable_frame)
-            row_frame.pack(fill="x", pady=2)
+            row_frame.pack(fill="x", pady=4)
             _configure_row_columns(row_frame)
 
             # 既存チェック
@@ -2030,7 +2208,7 @@ class HotelCleaningSystem:
                 # macOSではチェックボックスの色変更が効かないため、
                 # 赤い「☑」ラベルで代用する（登録済み行はもともと操作不可）
                 check_widget = ttk.Label(row_frame, text="☑", foreground="red",
-                                         font=("", 16))
+                                         font=("", 18))
                 check_widget.grid(row=0, column=0, padx=5, sticky="w")
             else:
                 check_widget = ttk.Checkbutton(row_frame, variable=check_var)
@@ -2068,13 +2246,15 @@ class HotelCleaningSystem:
 
             # プルダウンの選択＝エコ認識としてチェックを連動させる。
             # ×／エコドア／清掃不要 を選んだらチェックON（エコ登録の意思表示）、
-            # 通常清掃を選んだらチェックOFF（未チェック＝通常清掃として登録）。
+            # 毎日デュベ清掃を選んだらチェックOFF（エコ対象外として登録）。
             # 強制エコ（エコプラン）の行はチェック固定のため連動させない
             def on_status_selected(event, var=check_var, sv=status_var,
                                    rn=room_number):
                 if rn in forced_eco_rooms:
+                    # 自動エコはチェック固定。エコ区分に応じて赤字だけ更新する
+                    update_auto_eco_color(rn)
                     return
-                var.set(sv.get() != self.NORMAL_CLEAN_LABEL)
+                var.set(sv.get() != self.DAILY_CLEAN_LABEL)
             status_combo.bind('<<ComboboxSelected>>', on_status_selected)
 
             if is_existing:
@@ -2089,6 +2269,7 @@ class HotelCleaningSystem:
                 'status_var': status_var,
                 'status_combo': status_combo,
             }
+            update_auto_eco_color(room_number)
 
             # 行右端の「編集」ボタン：部屋編集画面を開く。
             # 強制エコを通常清掃に落としたい場合もここから変更する。
@@ -2107,6 +2288,10 @@ class HotelCleaningSystem:
 
         # 初期カウント更新
         update_count()
+
+        # チェックイン日（登録起点日）を変えたら「自動エコ」の赤字を判定し直す
+        for var in checkin_vars.values():
+            var.trace('w', update_all_auto_eco_colors)
 
         # ボタン（枠は上部で最下部固定済み。ここでは中身のボタンだけ追加する）
         def register_rooms():
@@ -2134,18 +2319,15 @@ class HotelCleaningSystem:
                            room_checkin, days, daily_clean=False):
                 """レコードを組み立てて self.records に追加する。
 
-                3日周期〇の起点（cycle_anchor）には実C/I日を使う。
-                エコ部屋は room_checkin が登録起点日のままなので、
-                予約CSVから実C/I日が取れていればそちらを優先する。
+                room_checkin は実C/I日（_resolve_stay_period の結果）。
+                3日周期〇もこの日から数える（+3, +6 …）。
                 daily_clean=True は毎日清掃（全中日〇）。"""
                 if isinstance(guest_info, dict):
                     guest_name = guest_info.get('name', '')
                     is_ecoplan_guest = guest_info.get('is_ecoplan', False)
-                    real_checkin = guest_info.get('checkin')
                 else:
                     guest_name = guest_info or ''
                     is_ecoplan_guest = False
-                    real_checkin = None
 
                 record = {
                     'room': room_number,
@@ -2157,7 +2339,6 @@ class HotelCleaningSystem:
                     'middle_status': middle_status,
                     'schedule': self._build_room_schedule(
                         room_checkin, days, middle_status,
-                        cycle_anchor=real_checkin,
                         daily_clean=daily_clean),
                     'is_new': True
                 }
@@ -2180,26 +2361,19 @@ class HotelCleaningSystem:
                 middle_status = status_vars[room_number].get() or '×'
                 guest_info = guest_name_map.get(room_number, {})
 
-                if middle_status == self.NORMAL_CLEAN_LABEL:
-                    # 全日設定で通常清掃を明示選択した部屋は毎日清掃（全中日〇）
-                    room_checkin, days = self._resolve_stay_period(
-                        guest_info, checkin_date)
+                # C/I日・泊数は部屋ごとの実際のC/I日／C/O日を使う
+                # （予約CSV・予約詳細CSVから取得。取れなければ登録起点日基準）。
+                # 3日周期の〇も実際のC/I日から数えるので、C/I日の翌日・翌々日は
+                # 必ずエコ（×／エコドア／清掃不要）になる
+                room_checkin, days = self._resolve_stay_period(
+                    guest_info, checkin_date)
+
+                if middle_status == self.DAILY_CLEAN_LABEL:
+                    # エコ区分で毎日デュベ清掃を明示選択した部屋（全中日〇）
                     add_record(room_number, guest_info, middle_status,
-                               room_checkin, days, daily_clean=True)
+                               room_checkin, days)
                     daily_count += 1
                     continue
-                else:
-                    # 泊数の決定：
-                    #   予約詳細CSVからC/O日が取れていれば
-                    #   「登録起点日（=清掃日）〜C/O日」で実際の残り日数を使う。
-                    #   取れていない場合は従来どおり2泊固定。
-                    checkout_date = (guest_info.get('checkout')
-                                     if isinstance(guest_info, dict) else None)
-                    room_checkin = checkin_date
-                    if checkout_date and checkout_date > checkin_date:
-                        days = (checkout_date - checkin_date).days
-                    else:
-                        days = 2
 
                 add_record(room_number, guest_info, middle_status,
                            room_checkin, days)
@@ -2208,8 +2382,8 @@ class HotelCleaningSystem:
             # --- チェックしなかった部屋：通常清掃として自動登録 ---
             # エコ対象に選ばなかった在室部屋は、実C/I日を起点に
             # NORMAL_CLEAN_CYCLE 日ごとの通常清掃（〇）としてDBに登録する。
-            # 全日設定で「通常清掃」を明示選択した部屋（選択するとチェックが
-            # 外れる）は毎日清掃として全中日に〇を立てる。
+            # エコ区分で「毎日デュベ清掃」を明示選択した部屋（選択するとチェックが
+            # 外れる）は毎日デュベ清掃として全中日に〇を立てる。
             # アーニング表ではどちらも従来どおり連泊(stay)扱いのまま
             # （_load_db_registered_rooms が通常清掃を除外している）。
             for room_info in eco_rooms:
@@ -2222,9 +2396,11 @@ class HotelCleaningSystem:
                     guest_info, checkin_date)
 
                 daily = (status_vars[room_number].get()
-                         == self.NORMAL_CLEAN_LABEL)
-                add_record(room_number, guest_info, self.NORMAL_CLEAN_LABEL,
-                           room_checkin, days, daily_clean=daily)
+                         == self.DAILY_CLEAN_LABEL)
+                add_record(room_number, guest_info,
+                           self.DAILY_CLEAN_LABEL if daily
+                           else self.NORMAL_CLEAN_LABEL,
+                           room_checkin, days)
                 if daily:
                     daily_count += 1
                 else:
@@ -2256,7 +2432,7 @@ class HotelCleaningSystem:
                                     f"エコ清掃: {eco_count}件\n"
                                     f"通常清掃: {normal_count}件"
                                     f"（実C/I日から{self.NORMAL_CLEAN_CYCLE}日ごとに〇）\n"
-                                    f"毎日清掃: {daily_count}件（全中日に〇）\n"
+                                    f"{self.DAILY_CLEAN_LABEL}: {daily_count}件（全中日に〇）\n"
                                     f"登録起点日: {checkin_date.strftime('%Y年%m月%d日')}\n\n"
                                     "エコ票（Excel）が必要な場合は「エコ票作成」を押してください。")
             else:
@@ -2272,7 +2448,7 @@ class HotelCleaningSystem:
         dialog.update_idletasks()
         need_w = (scrollable_frame.winfo_reqwidth()
                   + scrollbar.winfo_reqwidth() + 40)  # 外枠padding15×2 + 余裕
-        self._fit_toplevel_to_screen(dialog, max(900, need_w), 860,
+        self._fit_toplevel_to_screen(dialog, max(960, need_w), 1000,
                                      min_w=560, min_h=420)
 
     def _save_records_to_db(self, records_to_save):
@@ -2437,14 +2613,20 @@ class HotelCleaningSystem:
 
         dialog = tk.Toplevel(self.root)
         dialog.title("部屋編集")
-        dialog.geometry("250x400")
-        dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
+        # 文字を大きくした分、縦長の大きめサイズで開く（画面に収まるよう自動調整）
+        self._fit_toplevel_to_screen(dialog, 520, 820, min_w=360, min_h=420)
 
-        ttk.Label(dialog, text="編集する部屋を選択してください：").pack(pady=10)
+        ttk.Label(dialog, text="編集する部屋を選択してください：",
+                  font=("", self.BIG_FONT_SIZE, "bold")).pack(pady=10)
 
-        listbox = tk.Listbox(dialog, selectmode=tk.SINGLE)
+        # ボタンを先に最下部へ固定（ウィンドウが低くても見切れないように）
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(side="bottom", pady=12)
+
+        listbox = tk.Listbox(dialog, selectmode=tk.SINGLE,
+                             font=("", self.BIG_FONT_SIZE + 1))
         for room in all_rooms:
             record = self.find_room_record(room)
             if record:
@@ -2461,9 +2643,6 @@ class HotelCleaningSystem:
             listbox.activate(idx)
             listbox.see(idx)
 
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(pady=10)
-
         def on_edit():
             selection = listbox.curselection()
             if selection:
@@ -2477,8 +2656,10 @@ class HotelCleaningSystem:
             else:
                 messagebox.showwarning("警告", "部屋を選択してください。")
 
-        ttk.Button(button_frame, text="編集", command=on_edit).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="キャンセル", command=dialog.destroy).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="編集", command=on_edit,
+                   style="Big.TButton").pack(side="left", padx=5)
+        ttk.Button(button_frame, text="キャンセル", command=dialog.destroy,
+                   style="Big.TButton").pack(side="left", padx=5)
 
         # ダブルクリック・Enterキーでも編集画面を開く
         listbox.bind("<Double-Button-1>", lambda e: on_edit())
@@ -2532,8 +2713,6 @@ class HotelCleaningSystem:
 
         dialog = tk.Toplevel(self.root)
         dialog.title(f"部屋 {room_number} の編集")
-        dialog.geometry("560x740")
-        dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -2544,18 +2723,18 @@ class HotelCleaningSystem:
         edit_vars = {}
 
         # 部屋番号（編集不可）
-        ttk.Label(frame, text="部屋番号：").grid(row=0, column=0, sticky="w", pady=5)
-        ttk.Label(frame, text=room_number, font=("", 10, "bold")).grid(row=0, column=1, sticky="w", pady=5)
+        ttk.Label(frame, text="部屋番号：").grid(row=0, column=0, sticky="w", pady=8)
+        ttk.Label(frame, text=room_number, font=("", 10, "bold")).grid(row=0, column=1, sticky="w", pady=8)
 
         # お客様名
-        ttk.Label(frame, text="お客様名：").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="お客様名：").grid(row=1, column=0, sticky="w", pady=8)
         edit_vars['guest'] = tk.StringVar(value=record['guest'])
-        ttk.Entry(frame, textvariable=edit_vars['guest'], width=30).grid(row=1, column=1, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=edit_vars['guest'], width=30).grid(row=1, column=1, sticky="w", pady=8)
 
         # チェックイン日
-        ttk.Label(frame, text="チェックイン日：").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="チェックイン日：").grid(row=2, column=0, sticky="w", pady=8)
         checkin_frame = ttk.Frame(frame)
-        checkin_frame.grid(row=2, column=1, sticky="w", pady=5)
+        checkin_frame.grid(row=2, column=1, sticky="w", pady=8)
 
         edit_vars['checkin_year'] = tk.StringVar(value=str(record['date'].year))
         edit_vars['checkin_month'] = tk.StringVar(value=str(record['date'].month))
@@ -2569,9 +2748,9 @@ class HotelCleaningSystem:
         ttk.Label(checkin_frame, text="日").pack(side="left")
 
         # チェックアウト日
-        ttk.Label(frame, text="チェックアウト日：").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="チェックアウト日：").grid(row=3, column=0, sticky="w", pady=8)
         checkout_frame = ttk.Frame(frame)
-        checkout_frame.grid(row=3, column=1, sticky="w", pady=5)
+        checkout_frame.grid(row=3, column=1, sticky="w", pady=8)
 
         checkout_date = record['date'] + timedelta(days=record['days'])
         edit_vars['checkout_year'] = tk.StringVar(value=str(checkout_date.year))
@@ -2586,37 +2765,41 @@ class HotelCleaningSystem:
         ttk.Label(checkout_frame, text="日").pack(side="left")
 
         # 宿泊日数（自動計算・表示のみ）
-        ttk.Label(frame, text="宿泊日数：").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="宿泊日数：").grid(row=4, column=0, sticky="w", pady=8)
         days_label = ttk.Label(frame, text=f"{record['days']}日", font=("", 10, "bold"))
-        days_label.grid(row=4, column=1, sticky="w", pady=5)
+        days_label.grid(row=4, column=1, sticky="w", pady=8)
 
-        # 中日ステータス（×／エコドア／清掃不要・アメ不要）
-        ttk.Label(frame, text="全日設定：").grid(row=5, column=0, sticky="w", pady=5)
+        # エコ区分（中日ステータス）。変更すると3日周期のパターンで引き直す。
+        # 右の「全日設定」ボタンを押したときだけ、選んだ値を全中日に入れる
+        ttk.Label(frame, text="エコ区分：").grid(row=5, column=0, sticky="w", pady=8)
+        middle_frame = ttk.Frame(frame)
+        middle_frame.grid(row=5, column=1, sticky="w", pady=8)
         current_middle = record.get('middle_status') or (
             'エコドア' if record['ecodoor'] else '×')
         edit_vars['middle_status'] = tk.StringVar(value=current_middle)
         middle_combo = ttk.Combobox(
-            frame, textvariable=edit_vars['middle_status'],
-            values=self.MIDDLE_STATUS_CHOICES, state='readonly', width=16)
-        middle_combo.grid(row=5, column=1, sticky="w", pady=5)
+            middle_frame, textvariable=edit_vars['middle_status'],
+            values=self.EDIT_MIDDLE_STATUS_CHOICES, state='readonly', width=16)
+        middle_combo.pack(side="left")
+        # 「全日設定」ボタンの実体は fill_all_days（後で定義してここへ追加する）
         # ホイールによる値の誤変更を防止
         middle_combo.bind("<MouseWheel>", lambda e: "break")
         middle_combo.bind("<Button-4>", lambda e: "break")
         middle_combo.bind("<Button-5>", lambda e: "break")
 
         # エコプラン
-        ttk.Label(frame, text="プラン：").grid(row=6, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="プラン：").grid(row=6, column=0, sticky="w", pady=8)
         edit_vars['ecoplan'] = tk.BooleanVar(value=record['ecoplan'])
         ttk.Checkbutton(frame, text="エコプラン", variable=edit_vars['ecoplan']).grid(row=6, column=1, sticky="w",
-                                                                                      pady=5)
+                                                                                      pady=8)
 
         # エコ再開日（この日から3日周期を引き直す）
         # 指定した日がエコ（中日ステータス）の1日目になり、〇はその2日後・5日後 …
         # に立つ。前日を「直前の清掃日」とみなすので×は2日連続に収まる。
         # 指定日より前の日と C/I・C/O 行は一切触らない。
-        ttk.Label(frame, text="エコ再開日：").grid(row=7, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="エコ再開日：").grid(row=7, column=0, sticky="w", pady=8)
         reassign_frame = ttk.Frame(frame)
-        reassign_frame.grid(row=7, column=1, sticky="w", pady=5)
+        reassign_frame.grid(row=7, column=1, sticky="w", pady=8)
 
         # 初期値：今日が中日ならその日（＝昨日まで清掃済みで今日からエコ、の想定）、
         # 範囲外ならC/I日の翌日（＝標準の周期と同じ結果になる日）
@@ -2640,12 +2823,15 @@ class HotelCleaningSystem:
         # この reassign_frame へ追加する
 
         # 個別スケジュール編集
-        ttk.Label(frame, text="スケジュール編集：").grid(row=8, column=0, sticky="nw", pady=5)
+        ttk.Label(frame, text="スケジュール編集：").grid(row=8, column=0, sticky="nw", pady=8)
         schedule_frame = ttk.Frame(frame)
-        schedule_frame.grid(row=8, column=1, sticky="ew", pady=5)
+        schedule_frame.grid(row=8, column=1, sticky="nsew", pady=5)
+        # ウィンドウを縦に広げた分はスケジュール一覧が伸びる
+        frame.rowconfigure(8, weight=1)
+        frame.columnconfigure(1, weight=1)
 
         # スケジュール編集用のScrollable Frame
-        canvas = tk.Canvas(schedule_frame, width=400, height=250, bg="white")
+        canvas = tk.Canvas(schedule_frame, width=520, height=420, bg="white")
         scrollbar = ttk.Scrollbar(schedule_frame, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
 
@@ -2706,9 +2892,13 @@ class HotelCleaningSystem:
         # スケジュール項目の辞書
         schedule_vars = {}
 
-        # 振り直しのエコ再開日。日付や全日設定を変えて
+        # 振り直しのエコ再開日。日付やエコ区分を変えて
         # スケジュールを描き直すときも同じ日で引き直せるよう覚えておく
         reassign_state = {'anchor': None}
+
+        # 「全日設定」ボタンが押されているか。エコ区分を変えると解除し、
+        # 3日周期のパターンに戻す
+        fill_state = {'on': False}
 
         # {'M/D': datetime}。'M/D' キーは年を持たないため、
         # エコ再開日との前後比較用に実日付を別途保持する
@@ -2796,18 +2986,21 @@ class HotelCleaningSystem:
                 data_frame = ttk.Frame(main_container)
                 data_frame.pack(fill="both", expand=True)
 
-                # 3日周期を反映した既定パターンを生成する。
+                # 既定パターンを生成する。
+                # ・通常は3日周期（C/I日から+3, +6 …に〇）
+                # ・「全日設定」ボタンを押した後は、選んだ値を全中日に入れる
                 # ・DBに行が無い日（未登録の部屋・C/O延長で増えた日）は
                 #   このパターンから〇／×等を補完する
-                # ・ダイアログで中日ステータスを変更した場合は、保存済みの
+                # ・エコ区分を変更した／全日設定を押した場合は、保存済みの
                 #   内容よりパターンを優先して全中日を引き直す
-                #   （変更していなければ手動編集済みの保存内容を優先）
+                #   （どちらもしていなければ手動編集済みの保存内容を優先）
                 middle_now = edit_vars['middle_status'].get() or '×'
                 original_middle = record.get('middle_status') or (
                     'エコドア' if record['ecodoor'] else '×')
                 pattern = self._build_room_schedule(
-                    checkin, (checkout - checkin).days, middle_now)
-                repattern = (middle_now != original_middle)
+                    checkin, (checkout - checkin).days, middle_now,
+                    fill_all=fill_state['on'])
+                repattern = (middle_now != original_middle) or fill_state['on']
 
                 # 日付範囲でスケジュール表示
                 current_date = checkin
@@ -2882,7 +3075,7 @@ class HotelCleaningSystem:
                 if days > 10:
                     info_label = tk.Label(main_container,
                                           text=f"※{days}日間の長期滞在 - マウスホイールまたはスクロールバーで全日程を確認してください",
-                                          fg="blue", font=("", 8), wraplength=350)
+                                          fg="blue", font=("", 8), wraplength=480)
                     info_label.pack(pady=5)
                     bind_mousewheel(info_label)
 
@@ -2896,6 +3089,9 @@ class HotelCleaningSystem:
                 days_label.config(text="日付エラー")
                 error_label = tk.Label(scrollable_frame, text="正しい日付を入力してください", fg="red")
                 error_label.pack()
+            finally:
+                # 描き直した一覧の文字も大きくする
+                self._enlarge_widget_fonts(scrollable_frame)
 
         # 日数自動計算機能
         def update_days():
@@ -2905,9 +3101,23 @@ class HotelCleaningSystem:
         for var in ['checkin_year', 'checkin_month', 'checkin_day', 'checkout_year', 'checkout_month', 'checkout_day']:
             edit_vars[var].trace('w', lambda *args: update_days())
 
-        # 中日ステータス変更時もスケジュール表示を更新
-        # （3日周期の〇パターンを引き直すため）
-        edit_vars['middle_status'].trace('w', lambda *args: update_days())
+        # エコ区分変更時もスケジュール表示を更新
+        # （全日設定は解除し、3日周期のパターンで引き直す）
+        def on_middle_changed(*args):
+            fill_state['on'] = False
+            update_days()
+
+        edit_vars['middle_status'].trace('w', on_middle_changed)
+
+        def fill_all_days():
+            """「全日設定」ボタン：選んでいるエコ区分を全中日に入れる。
+            エコ再開日の振り直しは解除する（全日に同じ値を入れるため）"""
+            fill_state['on'] = True
+            reassign_state['anchor'] = None
+            update_schedule_display()
+
+        ttk.Button(middle_frame, text="全日設定",
+                   command=fill_all_days).pack(side="left", padx=(8, 0))
 
         def do_reassign():
             """「この日から振り直し」ボタン：エコ再開日以降の中日を引き直す"""
@@ -2955,8 +3165,9 @@ class HotelCleaningSystem:
                            edit_vars['middle_status'].get() or '×')
 
         def clear_reassign():
-            """「解除」ボタン：振り直しを取り消して既定の表示に戻す"""
+            """「解除」ボタン：振り直し・全日設定を取り消して既定の表示に戻す"""
             reassign_state['anchor'] = None
+            fill_state['on'] = False
             update_schedule_display()
 
         ttk.Button(reassign_frame, text="この日から振り直し",
@@ -3065,6 +3276,14 @@ class HotelCleaningSystem:
         ttk.Button(button_frame, text="保存", command=save_changes).pack(side="left", padx=5)
         ttk.Button(button_frame, text="キャンセル", command=cancel_changes).pack(side="left", padx=5)
 
+        # 画面全体の文字を大きくし、内容に合わせた縦長サイズで開く
+        # （画面が小さい場合は自動で縮小し、スケジュール一覧側が縮む）
+        self._enlarge_widget_fonts(frame)
+        dialog.update_idletasks()
+        need_w = frame.winfo_reqwidth() + 20
+        self._fit_toplevel_to_screen(dialog, max(760, need_w), 1000,
+                                     min_w=600, min_h=500)
+
     def get_room_schedule(self, room_number):
         """部屋のスケジュールを取得"""
         # メモリから検索
@@ -3149,7 +3368,7 @@ class HotelCleaningSystem:
           middle_status='清掃不要・アメ不要' → 清掃不要、
           is_ecodoor=True → エコドア、それ以外の登録部屋 → エコ清掃。
 
-        ※ middle_status='通常清掃' の部屋は rooms に登録されていても
+        ※ middle_status='通常清掃'／'毎日デュベ清掃' の部屋は rooms に登録されていても
           エコ扱いにはしない（アーニング表では従来どおり連泊(stay)として
           空欄・緑塗りで出す）。そのため登録済み集合には加えない。"""
         registered = set()
@@ -3164,7 +3383,7 @@ class HotelCleaningSystem:
             except (TypeError, ValueError):
                 continue
             # 通常清掃の部屋はエコ判定の対象外（連泊扱いのまま）
-            if middle_status == self.NORMAL_CLEAN_LABEL:
+            if middle_status in self.NON_ECO_MIDDLE_STATUSES:
                 continue
             registered.add(rn)
             if middle_status == self.NO_CLEAN_LABEL:
