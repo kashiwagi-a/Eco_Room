@@ -261,16 +261,6 @@ class HotelCleaningSystem:
 
         return {'total': 0, 'checkout': 0, 'empty': 0, 'null_or_empty': 0}
 
-    def create_database_backup_silent(self):
-        """サイレントバックアップ作成（メッセージなし）"""
-        try:
-            backup_name = f"{self.backup_prefix}{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-            shutil.copy2(self.db_file, backup_name)
-            return backup_name
-        except Exception as e:
-            print(f"バックアップエラー: {e}")
-            return "作成失敗"
-
     def get_backup_list(self):
         """バックアップファイルの一覧を取得"""
         backup_files = glob.glob(f"{self.backup_prefix}*.db")
@@ -1127,7 +1117,8 @@ class HotelCleaningSystem:
             # 読み込み時点で済ませる（翌朝C/Oの部屋もここで消える。
             # そのため当日のアーニング表ではC/O=翌日の部屋は連泊扱いになる）。
             # 誤ったCSVを読み込んだ場合はバックアップ管理から復元する。
-            # 起動時に既にバックアップ作成済みのため、ここでは作成しない
+            # この削除は毎日発生するため、ここでは自動バックアップを作成しない
+            # （バックアップは手動で行う方針。起動時にも自動作成はしていない）。
             if csv_date:
                 cleanup_date = csv_date + timedelta(days=1)
                 deleted_info = self.cleanup_checkout_rooms(cleanup_date)
@@ -1457,11 +1448,9 @@ class HotelCleaningSystem:
             if not messagebox.askyesno("実行内容の確認", msg, parent=dialog):
                 return
 
-            # 削除は元に戻せないため、実行前にDBをバックアップしておく
-            # （バックアップ管理から復元できる）
+            # 自動バックアップは作成しない（バックアップは手動で行う方針）。
+            # 失敗時のrollbackがこの処理の分だけに効くよう、先にcommitしておく
             self.conn.commit()
-            backup_name = self.create_database_backup_silent()
-            log_lines.append(f"実行前バックアップ: {backup_name}")
 
             cursor = self.conn.cursor()
             try:
@@ -1488,8 +1477,7 @@ class HotelCleaningSystem:
             messagebox.showinfo("完了",
                                 f"部屋移動: {len(moves)}件\n削除: {len(deletes)}件\n"
                                 f"そのまま: {len(keeps)}件\n\n"
-                                f"実行内容は「{self.STATUS_CHECK_LOG_FILE}」に記録しました。\n"
-                                f"実行前バックアップ: {backup_name}")
+                                f"実行内容は「{self.STATUS_CHECK_LOG_FILE}」に記録しました。")
 
         button_frame = ttk.Frame(frame)
         button_frame.pack(pady=(10, 0))
