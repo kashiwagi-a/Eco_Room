@@ -1586,24 +1586,36 @@ class HotelCleaningSystem:
 
     def load_checkout_map(self, file_path):
         """予約詳細CSV(202605291形式)から
-        {予約番号: (チェックイン日datetime, チェックアウト日datetime, 泊数int)}
-        のマップを作成。
+        (チェックイン日datetime, チェックアウト日datetime, 泊数int) のマップを作成。
 
-        列構成: 列0=予約番号, 列4=チェックイン日(5列目), 列5=チェックアウト日(6列目),
-                列6=泊数(7列目)。同一予約番号は複数行あるがC/O日は同一
-        （前回検証済み: 食い違い0件）なので単純な辞書でよい。
+        列構成: 列0=予約番号, 列1=枝番(2列目), 列4=チェックイン日(5列目),
+                列5=チェックアウト日(6列目), 列6=泊数(7列目), 列12=「取消」(13列目)。
+
+        キーは2種類持つ:
+          ・(予約番号, 枝番) … 基本のキー。同一予約番号でも枝番（部屋）ごとに
+            C/O日が違うことがある（例: 団体予約の一部だけ延泊）ため。
+          ・予約番号のみ    … 枝番が一致しないとき用のフォールバック。
+            その予約番号の有効行の日付がすべて同じ場合にだけ登録する
+            （食い違う場合はどれが正しいか判断できないので登録しない）。
+
+        「取消」の行は読み飛ばす（有効な行の日付を上書きしないように）。
 
         C/I日は通常清掃の3日周期（実C/I日起点）の計算に使う。
-        読めなかった場合は None を返し、呼び出し側で登録起点日にフォールバックする。
+        C/I日が読めなかった行は None を入れ、呼び出し側で登録起点日にフォールバックする。
         """
-        co_map = {}
         encodings = ['cp932', 'shift_jis', 'utf-8']
 
         for encoding in encodings:
             try:
+                # エンコーディングを変えて読み直すときに前回の途中結果を残さない
+                co_map = {}
+                values_by_no = {}  # 予約番号 -> その予約の有効行の日付の集合
                 with open(file_path, 'r', encoding=encoding) as f:
                     for row in csv.reader(f):
                         if len(row) < 7 or not row[0].strip().isdigit():
+                            continue
+                        # 取消行は使わない
+                        if len(row) > 12 and row[12].strip() == '取消':
                             continue
                         co_raw = row[5].strip()
                         if not (co_raw.isdigit() and len(co_raw) == 8):
@@ -1622,7 +1634,14 @@ class HotelCleaningSystem:
                                 ci_date = None
                         nights_raw = row[6].strip()
                         nights = int(nights_raw) if nights_raw.isdigit() else None
-                        co_map[row[0].strip()] = (ci_date, co_date, nights)
+                        yoyaku_no = row[0].strip()
+                        value = (ci_date, co_date, nights)
+                        co_map[(yoyaku_no, row[1].strip())] = value
+                        values_by_no.setdefault(yoyaku_no, set()).add(value)
+                # 日付が1通りに決まる予約番号だけ、予約番号のみのキーも登録する
+                for yoyaku_no, values in values_by_no.items():
+                    if len(values) == 1:
+                        co_map[yoyaku_no] = next(iter(values))
                 return co_map
             except (UnicodeDecodeError, Exception):
                 continue
@@ -1638,8 +1657,9 @@ class HotelCleaningSystem:
         """予約CSVから部屋番号→{'name', 'is_ecoplan', 'checkin', 'checkout', 'nights'}
         のマッピングを作成。
 
-        checkout_map（予約番号→(C/I日, C/O日, 泊数)）が渡された場合は、
-        予約番号（列0）をキーに各部屋へC/I日・C/O日・泊数を紐づける。
+        checkout_map（load_checkout_map の戻り値）が渡された場合は、
+        (予約番号(列0), 枝番(列1)) をキーに各部屋へC/I日・C/O日・泊数を紐づける。
+        枝番が一致しないときは予約番号のみで引く（日付が1通りの予約に限る）。
         """
         if checkout_map is None:
             checkout_map = {}
@@ -1654,6 +1674,7 @@ class HotelCleaningSystem:
                     for row in reader:
                         if len(row) >= 12:
                             yoyaku_no = row[0].strip()  # 1列目：予約番号
+                            eda_no = row[1].strip()     # 2列目：枝番
                             room_number = row[10]  # 11列目：部屋番号
                             name_field = row[11]   # 12列目：名前＋プラン情報
 
@@ -1674,9 +1695,11 @@ class HotelCleaningSystem:
                             except Exception:
                                 pass
 
-                            # 予約番号からC/I日・C/O日・泊数を引く（無ければNone）
+                            # 予約番号＋枝番でC/I日・C/O日・泊数を引く。
+                            # 無ければ予約番号のみで引き、それも無ければNone
                             ci_date, co_date, nights = checkout_map.get(
-                                yoyaku_no, (None, None, None))
+                                (yoyaku_no, eda_no),
+                                checkout_map.get(yoyaku_no, (None, None, None)))
 
                             guest_map[room_number] = {
                                 'name': guest_name,
