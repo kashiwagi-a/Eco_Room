@@ -36,6 +36,27 @@ class HotelCleaningSystem:
 
         self.setup_gui()
         self.update_room_count_display()
+        self._show_main_window()
+
+    def _show_main_window(self):
+        """メイン画面を画面中央に出し、他のウィンドウより手前に表示する。
+
+        起動時に開くダイアログが無くなったため、何もしないとメイン画面が
+        画面左上の隅に、他のアプリの後ろに隠れた状態で開いてしまう
+        （macOSでは起動しても何も出ていないように見える）。"""
+        root = self.root
+        root.update_idletasks()
+        w, h = 560, 200
+        x = max(0, (root.winfo_screenwidth() - w) // 2)
+        y = max(0, (root.winfo_screenheight() - h) // 3)
+        root.geometry(f"{w}x{h}+{x}+{y}")
+        root.deiconify()
+        root.lift()
+        # 一時的に最前面に固定して手前に出し、すぐ解除する
+        # （固定したままだと他のアプリの上に居座ってしまうため）
+        root.attributes('-topmost', True)
+        root.after(500, lambda: root.attributes('-topmost', False))
+        root.focus_force()
 
     # プルダウン一覧の文字サイズ（pt）
     BIG_FONT_SIZE = 15
